@@ -5,6 +5,7 @@
 //! is connected.
 
 use crate::cats::all_cats;
+use crate::local_http::RequestOrigin;
 use crate::AppState;
 use serde::Serialize;
 use serde_json::json;
@@ -228,19 +229,22 @@ fn load_asset(app: &AppHandle, rel_path: &str) -> Option<(Vec<u8>, String)> {
     None
 }
 
+/// `cors` is empty, or the CORS headers for a local page (see local_http.rs).
 fn write_response(
     stream: &mut TcpStream,
+    cors: &str,
     status: &str,
     content_type: &str,
     cache_control: &str,
     body: &[u8],
 ) {
     let header = format!(
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\n{}Connection: close\r\n\r\n",
         status,
         content_type,
         body.len(),
-        cache_control
+        cache_control,
+        cors
     );
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(body);
@@ -250,12 +254,12 @@ fn write_response(
 fn handle_connection(mut stream: TcpStream, app: &AppHandle, running: &Arc<AtomicBool>) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let mut request_line = String::new();
+    let mut from = RequestOrigin::default();
     {
         let mut reader = BufReader::new(&stream);
         if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
             return;
         }
-        // Drain remaining request headers cleanly
         let mut line = String::new();
         for _ in 0..64 {
             line.clear();
@@ -263,15 +267,33 @@ fn handle_connection(mut stream: TcpStream, app: &AppHandle, running: &Arc<Atomi
             if n == 0 || line == "\r\n" || line == "\n" {
                 break;
             }
+            from.read_header(line.trim());
         }
     }
+
+    // The event stream carries every key press: web pages must not be able to listen in.
+    if !from.is_local() {
+        write_response(
+            &mut stream,
+            "",
+            "403 Forbidden",
+            "text/plain; charset=utf-8",
+            "no-store",
+            b"Only programs on this computer may use the KuroCat OBS source",
+        );
+        return;
+    }
+    let cors = from.cors_headers();
 
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let raw_path = parts.next().unwrap_or("/");
 
     if method == "OPTIONS" {
-        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n";
+        let resp = format!(
+            "HTTP/1.1 204 No Content\r\n{}Access-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n",
+            cors
+        );
         let _ = stream.write_all(resp.as_bytes());
         let _ = stream.flush();
         return;
@@ -280,6 +302,7 @@ fn handle_connection(mut stream: TcpStream, app: &AppHandle, running: &Arc<Atomi
     if method != "GET" && method != "HEAD" {
         write_response(
             &mut stream,
+            &cors,
             "405 Method Not Allowed",
             "text/plain; charset=utf-8",
             "no-store",
@@ -291,7 +314,7 @@ fn handle_connection(mut stream: TcpStream, app: &AppHandle, running: &Arc<Atomi
     let clean_route = raw_path.split('?').next().unwrap_or("/");
 
     if clean_route == "/obs/events" {
-        handle_sse(stream, app, running);
+        handle_sse(stream, app, running, &cors);
         return;
     }
 
@@ -299,6 +322,7 @@ fn handle_connection(mut stream: TcpStream, app: &AppHandle, running: &Arc<Atomi
         let body = build_state_snapshot_json(app);
         write_response(
             &mut stream,
+            &cors,
             "200 OK",
             "application/json; charset=utf-8",
             "no-store",
@@ -310,6 +334,7 @@ fn handle_connection(mut stream: TcpStream, app: &AppHandle, running: &Arc<Atomi
     let Some(rel) = sanitize_asset_path(raw_path) else {
         write_response(
             &mut stream,
+            &cors,
             "400 Bad Request",
             "text/plain; charset=utf-8",
             "no-store",
@@ -327,6 +352,7 @@ fn handle_connection(mut stream: TcpStream, app: &AppHandle, running: &Arc<Atomi
             };
             write_response(
                 &mut stream,
+                &cors,
                 "200 OK",
                 &mime,
                 cache,
@@ -336,6 +362,7 @@ fn handle_connection(mut stream: TcpStream, app: &AppHandle, running: &Arc<Atomi
         None => {
             write_response(
                 &mut stream,
+                &cors,
                 "404 Not Found",
                 "text/plain; charset=utf-8",
                 "no-store",
@@ -345,18 +372,14 @@ fn handle_connection(mut stream: TcpStream, app: &AppHandle, running: &Arc<Atomi
     }
 }
 
-fn handle_sse(mut stream: TcpStream, app: &AppHandle, running: &Arc<AtomicBool>) {
+fn handle_sse(mut stream: TcpStream, app: &AppHandle, running: &Arc<AtomicBool>, cors: &str) {
     let _ = stream.set_read_timeout(None);
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_nodelay(true);
 
-    let header = concat!(
-        "HTTP/1.1 200 OK\r\n",
-        "Content-Type: text/event-stream; charset=utf-8\r\n",
-        "Cache-Control: no-cache, no-transform\r\n",
-        "Connection: keep-alive\r\n",
-        "Access-Control-Allow-Origin: *\r\n",
-        "X-Accel-Buffering: no\r\n\r\n",
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache, no-transform\r\nConnection: keep-alive\r\n{}X-Accel-Buffering: no\r\n\r\n",
+        cors
     );
     if stream.write_all(header.as_bytes()).is_err() {
         return;

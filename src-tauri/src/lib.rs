@@ -4,6 +4,7 @@ mod cats;
 mod config;
 mod game_detect;
 mod input_hook;
+mod local_http;
 #[cfg(target_os = "macos")]
 mod macos_window;
 mod mcp;

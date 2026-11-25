@@ -9,6 +9,8 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::local_http::RequestOrigin;
+
 const SERVER_NAME: &str = "kurocat";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -455,12 +457,20 @@ where
     });
 }
 
-fn write_http_response(stream: &mut TcpStream, status: &str, content_type: &str, body: &str) {
+/// `cors` is empty, or the CORS headers for a local page (see local_http.rs).
+fn write_http_response(stream: &mut TcpStream, cors: &str, status: &str, content_type: &str, body: &str) {
+    let allow = if cors.is_empty() {
+        ""
+    } else {
+        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Mcp-Session-Id\r\n"
+    };
     let resp = format!(
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Mcp-Session-Id\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}{}Connection: close\r\n\r\n{}",
         status,
         content_type,
         body.as_bytes().len(),
+        cors,
+        allow,
         body
     );
     let _ = stream.write_all(resp.as_bytes());
@@ -486,6 +496,7 @@ fn handle_http_conn(mut stream: TcpStream, enabled: &AtomicBool, on_change: &dyn
     let path = parts[1];
 
     let mut content_length: usize = 0;
+    let mut from = RequestOrigin::default();
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header).is_err() {
@@ -495,6 +506,7 @@ fn handle_http_conn(mut stream: TcpStream, enabled: &AtomicBool, on_change: &dyn
         if trimmed.is_empty() {
             break;
         }
+        from.read_header(trimmed);
         if let Some((k, v)) = trimmed.split_once(':') {
             if k.eq_ignore_ascii_case("content-length") {
                 content_length = v.trim().parse().unwrap_or(0);
@@ -502,14 +514,29 @@ fn handle_http_conn(mut stream: TcpStream, enabled: &AtomicBool, on_change: &dyn
         }
     }
 
+    // Web pages may not change the pet's settings or skins, even though the browser can reach 127.0.0.1.
+    if !from.is_local() {
+        write_http_response(
+            &mut stream,
+            "",
+            "403 Forbidden",
+            "application/json; charset=utf-8",
+            r#"{"error":"Only programs on this computer may use KuroCat's MCP server"}"#,
+        );
+        return;
+    }
+    let cors = from.cors_headers();
+    let cors = cors.as_str();
+
     if method == "OPTIONS" {
-        write_http_response(&mut stream, "204 No Content", "text/plain", "");
+        write_http_response(&mut stream, cors, "204 No Content", "text/plain", "");
         return;
     }
 
     if !enabled.load(Ordering::Relaxed) {
         write_http_response(
             &mut stream,
+            cors,
             "403 Forbidden",
             "application/json; charset=utf-8",
             r#"{"error":"MCP server is disabled in KuroCat settings"}"#,
@@ -525,7 +552,7 @@ fn handle_http_conn(mut stream: TcpStream, enabled: &AtomicBool, on_change: &dyn
             "mcpEndpoint": "/mcp"
         })
         .to_string();
-        write_http_response(&mut stream, "200 OK", "application/json; charset=utf-8", &body);
+        write_http_response(&mut stream, cors, "200 OK", "application/json; charset=utf-8", &body);
         return;
     }
 
@@ -533,6 +560,7 @@ fn handle_http_conn(mut stream: TcpStream, enabled: &AtomicBool, on_change: &dyn
         if content_length > 2 * 1024 * 1024 {
             write_http_response(
                 &mut stream,
+                cors,
                 "413 Payload Too Large",
                 "application/json",
                 r#"{"error":"Payload too large"}"#,
@@ -552,7 +580,7 @@ fn handle_http_conn(mut stream: TcpStream, enabled: &AtomicBool, on_change: &dyn
                     "error": { "code": -32700, "message": format!("Parse error: {}", e) }
                 })
                 .to_string();
-                write_http_response(&mut stream, "400 Bad Request", "application/json; charset=utf-8", &err);
+                write_http_response(&mut stream, cors, "400 Bad Request", "application/json; charset=utf-8", &err);
                 return;
             }
         };
@@ -565,22 +593,23 @@ fn handle_http_conn(mut stream: TcpStream, enabled: &AtomicBool, on_change: &dyn
                 }
             }
             if responses.is_empty() {
-                write_http_response(&mut stream, "202 Accepted", "application/json", "");
+                write_http_response(&mut stream, cors, "202 Accepted", "application/json", "");
             } else {
                 let body = serde_json::to_string(&responses).unwrap_or_else(|_| "[]".to_string());
-                write_http_response(&mut stream, "200 OK", "application/json; charset=utf-8", &body);
+                write_http_response(&mut stream, cors, "200 OK", "application/json; charset=utf-8", &body);
             }
         } else if let Some(resp) = handle_jsonrpc(&parsed, on_change) {
             let body = resp.to_string();
-            write_http_response(&mut stream, "200 OK", "application/json; charset=utf-8", &body);
+            write_http_response(&mut stream, cors, "200 OK", "application/json; charset=utf-8", &body);
         } else {
-            write_http_response(&mut stream, "202 Accepted", "application/json", "");
+            write_http_response(&mut stream, cors, "202 Accepted", "application/json", "");
         }
         return;
     }
 
     write_http_response(
         &mut stream,
+        cors,
         "404 Not Found",
         "application/json; charset=utf-8",
         r#"{"error":"Not found. Use POST /mcp or GET /health"}"#,
