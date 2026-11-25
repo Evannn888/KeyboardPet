@@ -1562,15 +1562,28 @@ fn win_wait_for_previous_pid_if_requested() {
     }
 }
 
-fn is_over_interactive_silhouette(rx: f64, ry: f64, is_108: bool) -> (bool, bool) {
-    // Cat body/head oval centered around (0.48, 0.49) for 65% or (0.51, 0.48) for 108-key
-    let (cat_cx, cat_rx) = if is_108 { (0.51, 0.21) } else { (0.48, 0.25) };
+fn is_over_interactive_silhouette(
+    rx: f64,
+    ry: f64,
+    is_108: bool,
+    is_chinchilla: bool,
+) -> (bool, bool) {
+    // Cat body/head oval centered around (0.48, 0.49) for 65% or (0.51, 0.48) for 108-key;
+    // the chinchilla is rounder and sits behind the letters of a full-size keyboard.
+    let (cat_cx, cat_rx) = match (is_chinchilla, is_108) {
+        (true, true) => (0.45, 0.25),
+        (true, false) => (0.53, 0.32),
+        (false, true) => (0.51, 0.21),
+        (false, false) => (0.48, 0.25),
+    };
     let dx_cat = (rx - cat_cx) / cat_rx;
     let dy_cat = (ry - 0.49) / 0.27;
     let over_cat = (dx_cat * dx_cat + dy_cat * dy_cat) <= 1.0;
 
     // Keyboard & mouse lower area
-    let over_desk = if is_108 {
+    let over_desk = if is_chinchilla {
+        rx >= 0.04 && rx <= 0.96 && ry >= 0.65 && ry <= 0.96
+    } else if is_108 {
         rx >= 0.04 && rx <= 0.94 && ry >= 0.65 && ry <= 0.94
     } else {
         rx >= 0.06 && rx <= 0.92 && ry >= 0.65 && ry <= 0.91
@@ -1728,12 +1741,13 @@ fn start_hit_test_loop(
             let rx = (cx - win_x) as f64 / w;
             let ry = (cy - win_y) as f64 / h;
             let inside = rx >= 0.0 && rx <= 1.0 && ry >= 0.0 && ry <= 1.0;
-            let (locked, always_on_top, is_108, cur_scale) = {
+            let (locked, always_on_top, is_108, is_chinchilla, cur_scale) = {
                 let s = settings.lock().unwrap();
                 (
                     s.click_through_locked,
                     s.always_on_top,
                     s.keyboard_layout == "108",
+                    s.cat_breed == "my-chinchilla",
                     s.scale.clamp(0.20, 1.50),
                 )
             };
@@ -1853,7 +1867,7 @@ fn start_hit_test_loop(
             let inside_pet = pet_rx >= 0.0 && pet_rx <= 1.0 && pet_ry >= 0.0 && pet_ry <= 1.0;
 
             let (over_interactive, raw_over_cat) = if inside_pet {
-                is_over_interactive_silhouette(pet_rx, pet_ry, is_108)
+                is_over_interactive_silhouette(pet_rx, pet_ry, is_108, is_chinchilla)
             } else {
                 (false, false)
             };

@@ -1,8 +1,8 @@
 # KeyboardPet · 龙猫定制版
 
-基于 [qianyiai/kurocat](https://github.com/qianyiai/kurocat) 的个人定制版本：新增灰色龙猫 3D 桌宠，保留圆耳斑点、白肚皮和粉鼻子，并调整键盘倾斜角度，让键面更清晰。
+基于 [qianyiai/kurocat](https://github.com/qianyiai/kurocat) 的个人定制版本：新增奶油贴纸风的龙猫桌宠（2D 和 3D 同款），保留圆耳斑点、白肚皮和粉鼻子，配奶茶色键盘，并调整键盘倾斜角度，让键面更清晰。
 
-选择「我家龙猫」并使用 3D 模式即可体验。构建、修改和更新方法见 [定制说明](CUSTOMIZATIONS.md)。原项目的 MIT 许可证与说明保留如下。
+选择「我家龙猫」即可体验，2D 和 3D 模式都可以。构建、修改和更新方法见 [定制说明](CUSTOMIZATIONS.md)。原项目的 MIT 许可证与说明保留如下。
 
 # 🐈‍⬛ KuroCat — Open-Source Desktop Typing Cat Pet · 桌面打字小黑猫伴侣
 

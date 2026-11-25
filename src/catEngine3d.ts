@@ -5,6 +5,28 @@ import type { KeyboardOrientation, TailKeyMode } from './catEngine';
 import { DEFAULT_TAIL_KEY_IDS } from './catEngine';
 import { catAudio } from './audio';
 import {
+  CHINCHILLA,
+  ChinchillaArm,
+  ChinchillaTail,
+  PAW,
+  SHOULDER_R,
+  PX as CHIN_PX,
+  buildChinchillaBody,
+  buildChinchillaEar,
+  buildChinchillaEyeRig,
+  buildChinchillaFace,
+  buildChinchillaHeadset,
+  buildChinchillaHeart,
+  chinchillaFlank,
+  chinchillaSurfaceZ,
+  createChinchillaBodyMaterials,
+  createChinchillaEyeMaterial,
+  createInkMaterial,
+  type ChinchillaFace,
+} from './chinchillaModel';
+import { CHIN_DESK, CHIN_HEADSET, CHINCHILLA_ID, IDLE_PAW, TAIL_INNER, TAIL_TAP_SCALE } from './chinchillaStyle';
+import { StickerPass, markStickerLayer } from './stickerPass3d';
+import {
   FurShaderSystem,
   resolveFurPalette3D,
   type FurPalette3D,
@@ -44,6 +66,8 @@ interface PawTrack3D {
   last: THREE.Vector3;
   spring: Spring3D;
   keyId: string | null;
+  /** Sideways offset on wide keys (space bar). */
+  keyDx: number;
   t0: number;
   dur: number;
   down: boolean;
@@ -76,6 +100,36 @@ interface IdleAct3D {
   t0: number;
   dur: number;
   side: -1 | 1;
+}
+
+interface EyeLook3D {
+  eye: THREE.BufferGeometry;
+  arc: THREE.BufferGeometry;
+  squint: THREE.BufferGeometry;
+  blush: THREE.BufferGeometry;
+  mat: THREE.ShaderMaterial;
+}
+
+/** Everything only the chinchilla needs; built the first time it is selected. */
+interface ChinchillaRig {
+  body: THREE.BufferGeometry;
+  outline: THREE.Vector3[];
+  bodyMat: THREE.ShaderMaterial;
+  /** Head rotation uniform of the body skin. */
+  headRot: THREE.Vector3;
+  face: ChinchillaFace;
+  eyes: EyeLook3D[];
+  limbs: ChinchillaArm[];
+  /** Where each arm currently leaves the body, as an angle from the front. */
+  shoulderAngle: number[];
+  pawShadows: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[];
+  chestShades: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[];
+  tail: ChinchillaTail;
+  heart: THREE.Group;
+  headsetLed: THREE.MeshBasicMaterial;
+  sticker: StickerPass;
+  /** Shown only while the chinchilla is active. */
+  own: THREE.Object3D[];
 }
 
 interface SimpleLimb3D {
@@ -146,8 +200,8 @@ function withTowardEye(mat: THREE.Material, lift: number): THREE.Material {
 
 const spriteTexCache = new Map<string, { tex: THREE.CanvasTexture; aspect: number }>();
 
-function getPopupTexture(text: string): { tex: THREE.CanvasTexture; aspect: number } {
-  const key = `pop:${text}`;
+function getPopupTexture(text: string, tea: boolean): { tex: THREE.CanvasTexture; aspect: number } {
+  const key = `pop:${tea ? 'tea:' : ''}${text}`;
   const hit = spriteTexCache.get(key);
   if (hit) return hit;
 
@@ -163,7 +217,7 @@ function getPopupTexture(text: string): { tex: THREE.CanvasTexture; aspect: numb
   const g = c.getContext('2d')!;
   const r = 24;
   g.fillStyle = '#fbfaf3';
-  g.strokeStyle = '#24262e';
+  g.strokeStyle = tea ? CHIN_DESK.chassis : '#24262e';
   g.lineWidth = 6;
   g.beginPath();
   g.moveTo(r + 4, 5);
@@ -179,7 +233,7 @@ function getPopupTexture(text: string): { tex: THREE.CanvasTexture; aspect: numb
   g.fill();
   g.stroke();
 
-  g.fillStyle = '#181a20';
+  g.fillStyle = tea ? CHIN_DESK.legend : '#181a20';
   g.font = font;
   g.textAlign = 'center';
   g.textBaseline = 'middle';
@@ -276,6 +330,26 @@ function makeSoftShadowTex(): THREE.CanvasTexture {
   grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
   g.fillStyle = grad;
   g.fillRect(0, 0, 256, 256);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  spriteTexCache.set(key, { tex, aspect: 1 });
+  return tex;
+}
+
+function makePawShadowTexture(): THREE.CanvasTexture {
+  const key = 'shadow:paw';
+  const hit = spriteTexCache.get(key);
+  if (hit) return hit.tex;
+  const c = document.createElement('canvas');
+  c.width = 64;
+  c.height = 64;
+  const g = c.getContext('2d')!;
+  const grad = g.createRadialGradient(32, 32, 6, 32, 32, 31);
+  grad.addColorStop(0, 'rgba(94, 70, 56, 1)');
+  grad.addColorStop(0.5, 'rgba(94, 70, 56, 0.62)');
+  grad.addColorStop(1, 'rgba(94, 70, 56, 0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   spriteTexCache.set(key, { tex, aspect: 1 });
@@ -513,7 +587,11 @@ export class KuroCatEngine3D {
   private readonly homePos = new THREE.Vector3(0.02, 0, -0.02);
   private readonly bodyGeo: THREE.LatheGeometry;
   private readonly bodyMesh: THREE.Mesh;
-  private readonly outlineSamplePts: THREE.Vector3[];
+  private outlineSamplePts: THREE.Vector3[];
+  private readonly catOutlinePts: THREE.Vector3[];
+  private readonly catBodyMat: THREE.ShaderMaterial;
+  private readonly catShadow: THREE.Mesh;
+  private readonly hindPaws: THREE.Mesh[] = [];
 
   // Head mount tracks exact head pivot inside the continuous one-piece body mesh
   private readonly headMount = new THREE.Group();
@@ -537,12 +615,14 @@ export class KuroCatEngine3D {
     closedArc: THREE.Mesh;
     squintSlit: THREE.Mesh;
     blush: THREE.Mesh;
+    cat: EyeLook3D;
   }> = [];
   private readonly faceGroup = new THREE.Group();
-  private readonly chinchillaFace = new THREE.Group();
-  private readonly chinchillaEarDetails: THREE.Group[] = [];
   private classicWhiskers: THREE.Mesh | null = null;
+  private chin: ChinchillaRig | null = null;
   private isChinchilla = false;
+  private hugAmt = 0;
+  private lastSpacePaw: 'L' | 'R' = 'L';
 
   // Shared materials updated on skin switch
   private readonly pawMat: THREE.ShaderMaterial;
@@ -680,6 +760,9 @@ export class KuroCatEngine3D {
   private headRot = { pitch: -0.04, yaw: 0, roll: 0 };
 
   private paws: { L: PawTrack3D; R: PawTrack3D };
+  /** Side the chinchilla's tail comes round on, and the side of the key it was last asked for. */
+  private chinTailSide: -1 | 1 = 1;
+  private chinTailWant: -1 | 1 = 1;
   private tailTap = {
     keyId: null as string | null,
     t0: -100,
@@ -760,7 +843,15 @@ export class KuroCatEngine3D {
   ];
   private readonly tmpPawLocal = new THREE.Vector3();
   private readonly tmpArmOff = new THREE.Vector3();
+  private readonly tmpIdleDir = new THREE.Vector3();
+  private readonly tmpTailEdge = new THREE.Vector3();
+  private readonly tmpIdleFrom = new THREE.Vector3();
   private readonly tmpFxPos = new THREE.Vector3();
+  private readonly chinTailImpact = new THREE.Vector3();
+  private readonly tmpArmDir = new THREE.Vector3();
+  private readonly tmpWhite = new THREE.Color('#ffffff');
+  private readonly tmpPlane = new THREE.Matrix4();
+  private readonly tmpPlaneInv = new THREE.Matrix4();
 
   constructor(canvas: HTMLCanvasElement, options?: { embedded?: boolean }) {
     this.canvas = canvas;
@@ -788,7 +879,7 @@ export class KuroCatEngine3D {
     this.scene.add(this.catRoot);
 
     // Soft studio contact shadow underneath the plush sitting body
-    const catShadow = new THREE.Mesh(
+    const catShadow = (this.catShadow = new THREE.Mesh(
       new THREE.PlaneGeometry(2.15, 1.75),
       new THREE.MeshBasicMaterial({
         map: makeSoftShadowTex(),
@@ -796,7 +887,7 @@ export class KuroCatEngine3D {
         depthWrite: false,
         opacity: 0.78,
       }),
-    );
+    ));
     catShadow.rotation.x = -Math.PI / 2;
     catShadow.position.set(0, 0.003, 0.02);
     this.catRoot.add(catShadow);
@@ -822,7 +913,8 @@ export class KuroCatEngine3D {
       false,
       'centripetal',
     );
-    this.outlineSamplePts = bodyCurve.getSpacedPoints(360);
+    this.catOutlinePts = bodyCurve.getSpacedPoints(360);
+    this.outlineSamplePts = this.catOutlinePts;
     const profile = bodyCurve
       .getSpacedPoints(48)
       .map((q) => new THREE.Vector2(Math.max(0, q.x), q.y));
@@ -838,7 +930,8 @@ export class KuroCatEngine3D {
     this.bodyGeo.computeVertexNormals();
     this.bodyGeo.setAttribute('rest', this.bodyGeo.attributes.position.clone());
 
-    this.bodyMesh = new THREE.Mesh(this.bodyGeo, this.furSystem.createMaterial('CAT_BODY'));
+    this.catBodyMat = this.furSystem.createMaterial('CAT_BODY');
+    this.bodyMesh = new THREE.Mesh<THREE.BufferGeometry, THREE.Material>(this.bodyGeo, this.catBodyMat);
     this.bodyMesh.frustumCulled = false;
     this.catRoot.add(this.bodyMesh);
     this.petMeshes.push(this.bodyMesh);
@@ -851,6 +944,7 @@ export class KuroCatEngine3D {
       hp.position.set(s * 0.56, 0.065, 0.34);
       hp.rotation.y = s * 0.24;
       this.catRoot.add(hp);
+      this.hindPaws.push(hp);
     }
 
     // 3) Optional 3D Collar + Swinging Gold Bell (off by default to stay 100% pure original KuroCat!)
@@ -985,6 +1079,13 @@ export class KuroCatEngine3D {
         closedArc: closedArc.mesh,
         squintSlit: squintSlit.mesh,
         blush,
+        cat: {
+          eye: eyeGeo,
+          arc: closedArc.mesh.geometry,
+          squint: squintSlit.mesh.geometry,
+          blush: blushGeo,
+          mat: eyeMat,
+        },
       });
     }
 
@@ -1047,8 +1148,6 @@ export class KuroCatEngine3D {
       this.faceGroup.add(noseMesh, mouth.mesh);
       this.headMount.add(this.faceGroup);
     }
-
-    this.buildChinchillaDetails();
 
     // 8b) Sculpted 3D Gaming Headset (auto-equipped on PC game detection or manual toggle!)
     this.buildGamingHeadset();
@@ -1115,6 +1214,7 @@ export class KuroCatEngine3D {
         last: pos.clone(),
         spring: new Spring3D(pos, 3.6, 0.78),
         keyId: null,
+        keyDx: 0,
         t0: -100,
         dur: 0.08,
         down: false,
@@ -1135,80 +1235,409 @@ export class KuroCatEngine3D {
     this.resize();
   }
 
-  /** Rounded ears, mottling and short muzzle matching the owner's chinchilla. */
-  private buildChinchillaDetails(): void {
-    const outerMat = createHeadsetMaterial('#aaa8a4', 0.015, 0.025, '#e5e0d9');
-    const innerMat = createHeadsetMaterial('#ddccc6', 0.01, 0.025, '#eee4df');
-    const spotMat = new THREE.MeshBasicMaterial({ color: '#817a72' });
-    const muzzleMat = createHeadsetMaterial('#e9e5dc', 0.01, 0.025, '#f5f0e8');
-    const sphere = new THREE.SphereGeometry(1, 28, 20);
-    const spots: Array<[number, number, number]> = [
-      [-0.11, 0.40, 0.025], [-0.05, 0.45, 0.020], [0.04, 0.43, 0.023],
-      [0.13, 0.36, 0.029], [0.17, 0.26, 0.020], [0.10, 0.25, 0.022],
-      [-0.15, 0.29, 0.021], [-0.09, 0.22, 0.016], [0.02, 0.34, 0.017],
-      [0.15, 0.13, 0.022], [-0.02, 0.13, 0.016], [0.07, 0.07, 0.015],
-    ];
+  /** Face pivot of the active rig, in body-local units. */
+  private get headCy(): number {
+    return this.isChinchilla ? CHINCHILLA.headCy : HEAD_CY;
+  }
+
+  /** Sculpt, face, arms, tail and sticker border of the owner's chinchilla (chinchillaModel.ts). */
+  private buildChinchillaRig(): ChinchillaRig {
+    const { geo, outline } = buildChinchillaBody();
+    const skin = createChinchillaBodyMaterials();
+    const own: THREE.Object3D[] = [];
+    const add = <T extends THREE.Object3D>(parent: THREE.Object3D, o: T): T => {
+      o.visible = false;
+      parent.add(o);
+      own.push(o);
+      return o;
+    };
+
+    const bodyInk = new THREE.Mesh(geo, skin.ink);
+    bodyInk.frustumCulled = false;
+    add(this.catRoot, bodyInk);
+
     for (const ear of this.ears) {
-      const detail = new THREE.Group();
-      const outer = new THREE.Mesh(sphere, outerMat);
-      outer.position.set(0, 0.18, 0);
-      outer.scale.set(0.30, 0.40, 0.080);
-      const inner = new THREE.Mesh(sphere, innerMat);
-      inner.position.set(0, 0.19, 0.050);
-      inner.scale.set(0.245, 0.335, 0.041);
-      detail.add(outer, inner);
-      for (const [i, [sx, sy, r]] of spots.entries()) {
-        const x = sx * (ear.s < 0 ? 1 : -0.93);
-        const y = sy + (ear.s < 0 ? 0 : Math.sin(i * 2.1) * 0.025);
-        const z = 0.052 + 0.041 * Math.sqrt(Math.max(0, 1 - (x / 0.245) ** 2 - ((y - 0.19) / 0.335) ** 2));
-        const spot = new THREE.Mesh(new THREE.CircleGeometry(r, 9), spotMat);
-        spot.position.set(x, y, z + 0.003);
-        spot.scale.set(1, 0.72 + (i % 3) * 0.16, 1);
-        spot.rotation.z = i * 1.83;
-        detail.add(spot);
-      }
-      detail.visible = false;
-      ear.group.add(detail);
-      this.chinchillaEarDetails.push(detail);
-      this.petMeshes.push(outer);
+      const { group, solid } = buildChinchillaEar(ear.s);
+      add(ear.group, group);
+      this.petMeshes.push(solid);
     }
 
-    const muzzleZ = this.surfaceZ(0, -0.10);
-    for (const side of [-1, 1]) {
-      const cheek = new THREE.Mesh(sphere, muzzleMat);
-      cheek.scale.set(0.175, 0.115, 0.075);
-      cheek.position.set(side * 0.115, -0.105, muzzleZ + 0.012);
-      this.chinchillaFace.add(cheek);
-    }
-    const nose = new THREE.Mesh(sphere, this.noseMat);
-    nose.position.set(0, -0.052, muzzleZ + 0.098);
-    nose.scale.set(0.053, 0.032, 0.022);
-    this.chinchillaFace.add(nose);
-    const mouth = new TaperTube3D(20, 5, this.mouthMat, 12);
-    mouth.update((t, out) => {
-      const x = mix(-0.047, 0.047, t);
-      out.set(x, -0.105 - 0.014 * Math.sin(t * Math.PI), muzzleZ + 0.088);
-    }, () => 0.0035);
-    this.chinchillaFace.add(mouth.mesh);
+    const face = buildChinchillaFace();
+    add(this.headMount, face.group);
 
-    const whiskerGeos: Array<{ geo: THREE.BufferGeometry }> = [];
-    for (const side of [-1, 1]) {
-      for (let i = 0; i < 4; i++) {
-        const whisker = new TaperTube3D(10, 4, this.whiskerMat, 12);
-        whisker.update((t, out) => {
-          out.set(
-            side * mix(0.14, 1.00 - (i % 2) * 0.08, t),
-            -0.11 + (i - 1.5) * 0.022 + (i - 1.5) * 0.038 * t,
-            muzzleZ + 0.095 - 0.17 * t * t,
-          );
-        }, (t) => 0.0036 * (1 - 0.68 * t));
-        whiskerGeos.push({ geo: whisker.mesh.geometry });
-      }
+    const eyes = this.eyes.map((e): EyeLook3D => {
+      const rig = buildChinchillaEyeRig(e.s);
+      return {
+        eye: rig.patch,
+        arc: rig.sleep,
+        squint: rig.happy,
+        blush: rig.blush,
+        mat: createChinchillaEyeMaterial(e.s),
+      };
+    });
+
+    const limbs = this.arms.map(() => {
+      const limb = new ChinchillaArm();
+      add(this.scene, limb.group);
+      return limb;
+    });
+    const pawShadows = this.arms.map(() => {
+      const geo = new THREE.PlaneGeometry(0.46, 0.4);
+      geo.rotateX(-Math.PI / 2);
+      const mesh = new THREE.Mesh(
+        geo,
+        new THREE.MeshBasicMaterial({
+          map: makePawShadowTexture(),
+          transparent: true,
+          depthWrite: false,
+          polygonOffset: true,
+          polygonOffsetFactor: -2,
+          polygonOffsetUnits: -2,
+        }),
+      );
+      mesh.matrixAutoUpdate = false;
+      mesh.renderOrder = 8;
+      return add(this.scene, mesh);
+    });
+
+    const chestShades = this.arms.map(() => {
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.5, 0.46),
+        new THREE.MeshBasicMaterial({ map: makePawShadowTexture(), transparent: true, depthTest: false, depthWrite: false }),
+      );
+      mesh.renderOrder = 9;
+      return add(this.scene, mesh);
+    });
+
+    const tail = new ChinchillaTail();
+    add(this.scene, tail.group);
+    const heart = buildChinchillaHeart();
+    this.scene.add(heart);
+
+    const headset = buildChinchillaHeadset();
+    add(this.headsetGroup, headset.group);
+
+    // Closed hull for the mouse's open dome: same curve on top, nearly flat underneath.
+    const mouseGeo = new THREE.SphereGeometry(1, 36, 20);
+    const mp = mouseGeo.attributes.position;
+    for (let i = 0; i < mp.count; i++) {
+      const y = mp.getY(i);
+      const z = mp.getZ(i);
+      mp.setXYZ(i, mp.getX(i) * (1 - 0.07 * z), y > 0 ? y * (1 - 0.12 * z) : y * 0.1, z);
     }
-    this.chinchillaFace.add(new THREE.Mesh(mergeStaticGeometries(whiskerGeos), this.whiskerMat));
-    for (const item of whiskerGeos) item.geo.dispose();
-    this.chinchillaFace.visible = false;
-    this.headMount.add(this.chinchillaFace);
+    mouseGeo.computeVertexNormals();
+    const mouseInk = new THREE.Mesh(mouseGeo, createInkMaterial(0.014, CHIN_DESK.chassis));
+    mouseInk.position.copy(this.desk.mouseDome.position);
+    mouseInk.scale.copy(this.desk.mouseDome.scale);
+    add(this.desk.mouseDome.parent!, mouseInk);
+
+    return {
+      body: geo,
+      outline,
+      bodyMat: skin.fill,
+      headRot: skin.headRot,
+      face,
+      eyes,
+      limbs,
+      shoulderAngle: this.arms.map(() => 0.7),
+      pawShadows,
+      chestShades,
+      tail,
+      heart,
+      headsetLed: headset.led,
+      sticker: new StickerPass(),
+      own,
+    };
+  }
+
+  /** Swap silhouette, materials, pose and desk between the shared cat rig and the chinchilla. */
+  private applyBodyRig(): void {
+    const on = this.isChinchilla;
+    if (on && !this.chin) this.chin = this.buildChinchillaRig();
+    const chin = this.chin;
+    if (!chin) return;
+
+    this.bodyMesh.geometry = on ? chin.body : this.bodyGeo;
+    this.bodyMesh.material = on ? chin.bodyMat : this.catBodyMat;
+    this.outlineSamplePts = on ? chin.outline : this.catOutlinePts;
+    this.catRoot.rotation.set(0, 0, 0, 'XYZ');
+    if (on) {
+      this.seatChinchilla();
+      this.poseChinchillaRoot(0, 0, 0, 0);
+    } else {
+      this.homePos.set(0.02, 0, -0.02);
+      this.catRoot.position.copy(this.homePos);
+      this.catRoot.scale.set(0.90, 0.78, 0.90);
+    }
+    for (const sp of [this.sShift, this.sHunch, this.sSquash, this.sYaw, this.sPitch, this.sRoll]) sp.set(0);
+    // Thin outlines need real pixels; the cats' soft shading does not.
+    this.renderer.setPixelRatio(Math.min(on ? 2 : 1.5, window.devicePixelRatio || 1));
+
+    for (const o of chin.own) o.visible = on;
+    if (!on) chin.heart.visible = false;
+    for (const hp of this.hindPaws) hp.visible = !on;
+    for (const ear of this.ears) {
+      ear.mesh.visible = !on;
+      if (on) ear.group.scale.setScalar(CHINCHILLA.earScale);
+      else ear.group.scale.set(0.94, 1.0, 0.94);
+    }
+    if (this.classicWhiskers) this.classicWhiskers.visible = !on;
+    this.tailLimb.fill.mesh.visible = !on;
+    for (const cap of this.tailLimb.caps) cap.visible = !on;
+    this.catShadow.visible = !on;
+    this.desk.setShadowsVisible(!on);
+    this.desk.setTheme(on ? 'tea' : 'classic');
+
+    // It wears its own headphones.
+    for (const part of this.headsetGroup.children) {
+      if (!chin.own.includes(part)) part.visible = !on;
+    }
+
+    for (const arm of this.arms) {
+      arm.paw.visible = !on;
+      arm.limb.fill.mesh.visible = !on;
+      for (const cap of arm.limb.caps) cap.visible = !on;
+      if (!on) arm.shoulderLocal.set(arm.s * 0.54, 0.78, 0.22);
+    }
+    this.eyes.forEach((e, i) => {
+      const look = on ? chin.eyes[i] : e.cat;
+      e.mesh.geometry = look.eye;
+      e.mesh.material = look.mat;
+      e.closedArc.geometry = look.arc;
+      e.squintSlit.geometry = look.squint;
+      e.blush.geometry = look.blush;
+    });
+    markStickerLayer(this.scene);
+    this.placeHeadAndCollar();
+  }
+
+  private seatChinchilla(): void {
+    const x = this.desk.getLayoutId() === '108' ? CHINCHILLA.homeX108 : CHINCHILLA.homeX;
+    this.homePos.set(x, CHINCHILLA.homeY, CHINCHILLA.homeZ);
+  }
+
+  /** The chinchilla is one plump piece: it rocks and bobs as a whole, so its shape never changes. */
+  private poseChinchillaRoot(shift: number, hunch: number, bob: number, turn: number): void {
+    const k = CHINCHILLA.scale;
+    this.catRoot.position.set(this.homePos.x + shift, this.homePos.y, this.homePos.z);
+    this.catRoot.rotation.set(hunch - CHINCHILLA.lean, turn, -shift * 0.12, 'YXZ');
+    this.catRoot.scale.set(k, k * (1 - bob), k);
+    this.catRoot.updateMatrixWorld(true);
+  }
+
+  /** Where a free chinchilla paw goes: tucked up in front, the heart, or over its eyes. */
+  private chinchillaPawHome(side: -1 | 1, out: THREE.Vector3): THREE.Vector3 {
+    const rx = IDLE_PAW.x * CHIN_PX;
+    const ry = (IDLE_PAW.h + CHINCHILLA.frontLift) * CHIN_PX;
+    this.tmpPawLocal.set(side * rx, ry, chinchillaSurfaceZ(rx, ry) + 0.15);
+    this.attachLocal(this.tmpPawLocal, out);
+    if (this.hugAmt > 0.001) {
+      const hx = 28 * CHIN_PX;
+      const hy = 60 * CHIN_PX;
+      this.tmpPawLocal.set(side * hx, hy, chinchillaSurfaceZ(hx, hy) + 0.22);
+      out.lerp(this.attachLocal(this.tmpPawLocal, this.tmpV1), this.hugAmt);
+    }
+    if (this.privacyClose > 0.001) {
+      this.headMount.updateMatrixWorld(false);
+      this.tmpPawLocal
+        .set(
+          side * CHINCHILLA.eyeX,
+          -0.02,
+          chinchillaSurfaceZ(CHINCHILLA.eyeX, CHINCHILLA.headCy) + 0.12,
+        )
+        .applyMatrix4(this.headMount.matrixWorld);
+      out.lerp(this.tmpPawLocal, this.privacyClose);
+    }
+    return out;
+  }
+
+  /** Cloud tail: sways about the hip, beats the desk when cross, and swings round on its stalk to pat a key. */
+  private updateChinchillaTail(cross: number): void {
+    const tail = this.chin?.tail;
+    if (!tail) return;
+    const sway =
+      Math.sin(this.tailPhase * 1.3) * (0.03 + this.excite * 0.05) * (1 - this.sleepAmt * 0.8) * (1 - cross) +
+      (this.idleAct?.kind === 'tail' ? Math.sin(this.elapsed * 11) * 0.09 : 0) +
+      cross * (this.thumpLift * 0.46 - 0.06);
+    const hip = CHINCHILLA.tailHip;
+    const swing = (local: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 => {
+      const dx = local.x - hip.x;
+      const dy = (local.y - hip.y) * (1 - this.sleepAmt * 0.16);
+      this.tmpTailScratch.set(
+        hip.x + dx * Math.cos(sway) - dy * Math.sin(sway),
+        hip.y + dx * Math.sin(sway) + dy * Math.cos(sway),
+        local.z,
+      );
+      return this.attachLocal(this.tmpTailScratch, out);
+    };
+
+    // Where the cloud is on its way: out past the flank first, then down onto the key. For keys on the left
+    // it first crosses over behind the body.
+    const go = clamp(this.tailTap.reach, 0, 1);
+    const tapping = go > 0.001 && this.tailTap.keyId !== null;
+    const tip = this.tailTap.tip;
+    const s = tapping ? this.chinTailSide : 1;
+    const round = s > 0 ? go : clamp(go * 2 - 1, 0, 1);
+    const core = swing(CHINCHILLA.tailCore, this.tmpTailLoose);
+    const at = this.tmpTailAttached.copy(core);
+    const shrink = mix(1, TAIL_TAP_SCALE, smoothstep(0, s > 0 ? 0.45 : 0.3, go));
+    const flank = this.homePos.x + s * 1.16;
+    // Keep a point at least `room` inside the window's edge on that side.
+    this.camera.updateMatrixWorld();
+    const inside = (p: THREE.Vector3, room: number): THREE.Vector3 => {
+      const x0 = this.tmpTailEdge.set(0, p.y, p.z).project(this.camera).x;
+      const x1 = this.tmpTailEdge.set(1, p.y, p.z).project(this.camera).x;
+      p.x = s * Math.min(s * p.x, (0.97 - s * x0) / Math.max(1e-3, x1 - x0) - room);
+      return p;
+    };
+    if (tapping) {
+      const u = round;
+      const m = 1 - u;
+      const [p1, p2, p3] = this.tmpTailPath;
+      inside(p1.set(flank + s * 0.16, core.y + 0.36, core.z), 0.4);
+      inside(p2.set(s * Math.max(s * tip.x + 0.1, s * flank - 0.1), tip.y + 0.62, tip.z - 0.18), 0.36);
+      inside(p3.set(tip.x, tip.y + 0.17, tip.z - 0.02), 0.33);
+      if (s < 0) at.x = mix(core.x, flank - 0.4, smoothstep(0, 0.5, go));
+      at.multiplyScalar(m * m * m)
+        .addScaledVector(p1, 3 * m * m * u)
+        .addScaledVector(p2, 3 * m * u * u)
+        .addScaledVector(p3, u * u * u);
+    }
+    const turn = -0.9 * smoothstep(0.1, 1, go);
+    // Behind the body it turns over, so that it lands on either side with the same shape.
+    const mirror = s > 0 ? 1 : mix(1, -1, smoothstep(0.1, 0.5, go));
+    const gather = smoothstep(0.05, 0.5, go);
+    for (let i = 0; i < tail.count; i++) {
+      const r = tail.rest(i, this.tmpPawLocal) * CHINCHILLA.scale * shrink;
+      const p = swing(this.tmpPawLocal, this.tmpV3).sub(core);
+      // On the stalk the puffs towards the hip draw in, leaving a round pompon.
+      const keep = shrink * (i < TAIL_INNER ? 1 - gather : 1);
+      const cos = Math.cos(turn) * keep;
+      const sin = Math.sin(turn) * keep;
+      p.set((p.x * cos - p.y * sin) * mirror, p.x * sin + p.y * cos, p.z * keep).add(at);
+      if (i === CHINCHILLA.tailTip) this.chinTailImpact.set(p.x + r * 0.5 * mirror, p.y - r, p.z + r);
+      tail.set(i, p, r);
+    }
+
+    // The stalk leaves from behind the body, goes up and over outside its outline, and down onto the key.
+    const out = go > 0.02;
+    if (out) {
+      const a = this.attachLocal(this.tmpV1.set(s * (hip.x - 0.08), hip.y, hip.z), this.tmpTailPath[0]);
+      const c = inside(
+        this.tmpTailPath[2].set(
+          s * Math.max(s * at.x + 0.08, s * mix(at.x, flank + s * 0.18, round)),
+          at.y + 0.34 * round,
+          at.z - 0.6 * round,
+        ),
+        0.14,
+      );
+      const b = inside(
+        this.tmpTailPath[1].set(mix(at.x, flank + s * 0.28, smoothstep(0, 0.5, round)), a.y + 0.14, -0.52),
+        0.1,
+      );
+      const up = this.tmpV2.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
+      b.y += Math.max(0, c.dot(up) + 0.06 * round - b.dot(up)) / up.y;
+      tail.layStalk(
+        (u, o) => {
+          const m = 1 - u;
+          o.set(0, 0, 0)
+            .addScaledVector(a, m * m * m)
+            .addScaledVector(b, 3 * m * m * u)
+            .addScaledVector(c, 3 * m * u * u)
+            .addScaledVector(at, u * u * u);
+        },
+        (u) => mix(0.092, 0.112, u),
+        s,
+        this.camera.position,
+      );
+    }
+    tail.commit(this.tmpV1.copy(at), 0.26 * (s > 0 ? smoothstep(0.4, 0.72, go) : smoothstep(0.1, 0.5, round)), out);
+  }
+
+  /** Short sleeve from the flank to the paw, and the paw's soft shadow on the keys. */
+  private updateChinchillaArm(index: number, arm: (typeof this.arms)[number], tuck: number, onMouse: boolean, dt: number): void {
+    const chin = this.chin!;
+    const s = arm.s;
+    const cover = this.privacyClose;
+    const hug = this.hugAmt * tuck * (1 - cover);
+
+    // Tracked points lie on the keys; the mitten's centre rides above them, toes on the key.
+    const hand = arm.hand;
+    hand.y += (PAW.sole + 0.02) * (1 - tuck);
+    if (!onMouse) hand.z -= 0.05 * (1 - tuck);
+
+    // The arm leaves the body on the side it reaches towards, so it stays short.
+    const local = this.catRoot.worldToLocal(this.tmpV1.copy(hand));
+    const want = clamp(Math.atan2(s * local.x, Math.max(0.05, local.z)) + 0.2, 0.72, 1.16);
+    chin.shoulderAngle[index] += (mix(mix(want, 0.96, tuck), 0.8, cover) - chin.shoulderAngle[index]) * approach(16, dt);
+    const angle = chin.shoulderAngle[index];
+    chinchillaFlank(s * angle, CHINCHILLA.shoulderY, 0.1, arm.shoulderLocal);
+    // Idle, the arm is tucked in: a short stub that comes round from the side and runs straight into the paw.
+    const idle = tuck * (1 - hug) * (1 - cover);
+    const size = mix(1, IDLE_PAW.scale, idle);
+    const idleDir = this.tmpIdleDir;
+    const idleFrom = this.tmpIdleFrom;
+    if (idle > 0.001) {
+      const turn = IDLE_PAW.rot + IDLE_PAW.bend;
+      idleDir.set(-s * Math.sin(IDLE_PAW.rot), -Math.cos(IDLE_PAW.rot) * 0.9, 0.34).normalize();
+      idleFrom.set(-s * Math.sin(turn), -Math.cos(turn) * 0.9, 0.34).normalize();
+      const stub = this.tmpPawLocal
+        .copy(hand)
+        .addScaledVector(idleDir, -PAW.length * 0.5 * size)
+        .addScaledVector(this.tmpV1.addVectors(idleDir, idleFrom), -0.5 * CHINCHILLA.stub);
+      this.catRoot.worldToLocal(stub);
+      stub.z = chinchillaSurfaceZ(stub.x, stub.y) - 0.06;
+      arm.shoulderLocal.lerp(stub, idle);
+    }
+    this.attachLocal(arm.shoulderLocal, arm.shoulder);
+
+    const yaw = clamp(
+      Math.atan2(hand.x - arm.shoulder.x, Math.max(0.12, hand.z - arm.shoulder.z)) * 0.7 * (1 - tuck) - s * 0.1 * tuck,
+      -1,
+      1,
+    );
+    const dir = this.tmpArmDir.set(Math.sin(yaw) * 0.97, -0.24, Math.cos(yaw) * 0.97);
+    if (idle > 0.001) dir.lerp(idleDir, idle);
+    if (hug > 0.001) dir.lerp(this.tmpV2.set(-s * 0.8, 0.3, 0.52), hug);
+    if (cover > 0.001) dir.lerp(this.tmpV2.set(-s * 0.2, 0.97, 0.12), cover);
+    dir.normalize();
+
+    const wrist = this.tmpArmOff.copy(hand).addScaledVector(dir, -PAW.length * 0.5 * size);
+    wrist.y += 0.025 * (1 - cover) * (1 - hug) * (1 - idle);
+    const reach = arm.shoulder.distanceTo(wrist);
+    arm.c1
+      .set(s * Math.sin(angle) * (1 - hug * 0.5), 0.04 - hug * 0.5, Math.cos(angle))
+      .multiplyScalar(reach * 0.34);
+    if (idle > 0.001) arm.c1.lerp(this.tmpV1.copy(idleFrom).multiplyScalar(reach * 0.38), idle);
+    arm.c1.add(arm.shoulder);
+    arm.c2.copy(wrist).addScaledVector(dir, -reach * mix(0.34, 0.5, cover));
+    const up = this.tmpV2.copy(this.camera.position).sub(hand).normalize();
+    // Reaching out past the flank, the arm is solid and outlined from the body's own outline on.
+    const past = smoothstep(0.95, 1.15, angle) * (1 - tuck);
+    const fade = mix(clamp(0.22 / reach, 0.26, 0.5), 0.14, past);
+    const fur = this.tmpV3.set(s * Math.sin(angle), 0.25, Math.cos(angle));
+    const shoulder = mix(SHOULDER_R, PAW.wrist * size * 1.06, idle);
+    chin.limbs[index].update(arm.shoulder, arm.c1, arm.c2, wrist, dir, up, fade, fur, size, mix(mix(0.36, 0.2, past), 0.8, idle), shoulder, mix(1.8, 1.3, past));
+
+    // Tucked paws shade the chest behind them.
+    const shade = chin.chestShades[index];
+    const tailOver = this.tailTap.tip.x < this.homePos.x + 0.8 ? smoothstep(0.3, 0.7, this.tailTap.reach) : 0;
+    shade.material.opacity = 0.3 * Math.max(idle, hug) * (1 - tailOver);
+    shade.visible = shade.material.opacity > 0.01;
+    shade.position.copy(hand).addScaledVector(up, -0.05);
+    shade.position.y -= 0.05;
+    shade.quaternion.copy(this.camera.quaternion);
+
+    const shadow = chin.pawShadows[index];
+    const plane = this.desk.keyPlane(this.tmpPlane);
+    const onKeys = this.tmpV1.copy(hand).applyMatrix4(this.tmpPlaneInv.copy(plane).invert());
+    const inside =
+      smoothstep(0.1, -0.05, Math.abs(onKeys.x) - this.desk.getBoardWidth() * 0.5) *
+      smoothstep(0.1, -0.05, Math.abs(onKeys.z) - this.desk.getBoardDepth() * 0.5);
+    shadow.material.opacity = 0.42 * inside * (1 - smoothstep(0.1, 0.42, onKeys.y));
+    shadow.visible = shadow.material.opacity > 0.01;
+    shadow.matrix.copy(plane).multiply(this.tmpPlaneInv.makeTranslation(onKeys.x, 0.004, onKeys.z + 0.05));
+    shadow.matrixWorldNeedsUpdate = true;
   }
 
   /**
@@ -1451,9 +1880,7 @@ export class KuroCatEngine3D {
 
   private attachLocal(local: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
     const w = this.spineWeight(local.y);
-    const swell =
-      1 +
-      this.bend.bellySwell * smoothstep(1.30, 0.65, local.y) * smoothstep(0.0, 0.25, local.y);
+    const swell = 1 + this.bend.bellySwell * smoothstep(1.30, 0.65, local.y) * smoothstep(0.0, 0.25, local.y);
     return out
       .set(
         local.x * swell + this.bend.x * w,
@@ -1468,6 +1895,10 @@ export class KuroCatEngine3D {
    * zero computeVertexNormals, zero per-frame PCIe vertex upload!).
    */
   private deformCatBody(): void {
+    if (this.isChinchilla) {
+      this.chin?.headRot.set(this.headRot.pitch, this.headRot.yaw, this.headRot.roll);
+      return;
+    }
     this.furSystem.setBodyDeform(
       this.bend.x,
       this.bend.z,
@@ -1480,18 +1911,19 @@ export class KuroCatEngine3D {
   }
 
   private placeHeadAndCollar(): void {
-    const wHead = this.spineWeight(HEAD_CY);
-    const sHead = this.sinkWeight(HEAD_CY);
+    const cy = this.headCy;
+    const wHead = this.spineWeight(cy);
+    const sHead = this.sinkWeight(cy);
     this.headMount.position.set(
       this.bend.x * wHead,
-      HEAD_CY * (1 - this.bend.squash * sHead),
+      cy * (1 - this.bend.squash * sHead),
       this.bend.z * wHead,
     );
     this.headMount.rotation.set(this.headRot.pitch, this.headRot.yaw, this.headRot.roll, 'YXZ');
 
     if (!this.collarGroup.visible) return;
-    const y = this.collarY - 0.18 * clamp(this.headRot.pitch + 0.06, 0, 0.45);
-    const s = this.radiusAtY(y) / Math.max(0.05, this.collarR);
+    const y = (this.isChinchilla ? CHINCHILLA.collarY : this.collarY) - 0.18 * clamp(this.headRot.pitch + 0.06, 0, 0.45);
+    const s = (this.radiusAtY(y) / Math.max(0.05, this.collarR)) * (this.isChinchilla ? 1.02 : 1);
     this.collarGroup.scale.set(s, 1, s);
     const w = this.spineWeight(y);
     const dw = (this.spineWeight(y + 0.01) - this.spineWeight(y - 0.01)) / 0.02;
@@ -1558,7 +1990,7 @@ export class KuroCatEngine3D {
     const dt = Math.min(0.05, Math.max(0.001, (nowMs - this.lastFrameMs) / 1000));
     this.lastFrameMs = nowMs;
     this.update(dt);
-    this.renderer.render(this.scene, this.camera);
+    this.renderNow();
 
     if (this.rafId !== frameId) return;
 
@@ -1613,9 +2045,16 @@ export class KuroCatEngine3D {
     }, sleepMs);
   };
 
+  /** Draw one frame; the chinchilla gets its white die-cut sticker border. */
+  public renderNow(): void {
+    if (this.isChinchilla && this.chin) this.chin.sticker.render(this.renderer, this.scene, this.camera);
+    else this.renderer.render(this.scene, this.camera);
+  }
+
   public setCatSkin(skin: CatSkinConfig): void {
     const wasChinchilla = this.isChinchilla;
-    this.isChinchilla = skin.id === 'my-chinchilla';
+    this.isChinchilla = skin.id === CHINCHILLA_ID;
+    if (wasChinchilla !== this.isChinchilla) this.applyBodyRig();
     this.currentSkin = skin;
     const p = resolveFurPalette3D(skin, this.renderStyle);
     this.currentPalette = p;
@@ -1632,29 +2071,11 @@ export class KuroCatEngine3D {
     this.tuckLineMat.opacity = p.isDarkFur ? 0.36 : 0.24;
 
     this.faceGroup.visible = Boolean(p.nose) && !this.isChinchilla;
-    this.chinchillaFace.visible = this.isChinchilla;
-    if (this.classicWhiskers) this.classicWhiskers.visible = !this.isChinchilla;
-    this.ears.forEach((ear, i) => {
-      ear.mesh.visible = !this.isChinchilla;
-      this.chinchillaEarDetails[i].visible = this.isChinchilla;
-    });
     if (p.nose) this.noseMat.color.set(p.nose);
     if (p.mouth) this.mouthMat.color.set(p.mouth);
 
     const lashCol = p.isDarkFur ? '#0b0c10' : p.lid;
     for (const e of this.eyes) {
-      if (wasChinchilla !== this.isChinchilla) {
-        e.mesh.geometry.dispose();
-        e.mesh.geometry = this.makeCurvedFacePatchGeo(
-          e.s * (this.isChinchilla ? 0.33 : 0.25), 0.105,
-          this.isChinchilla ? 0.145 : EYE_MAX_RX,
-          this.isChinchilla ? 0.175 : EYE_MAX_RY, 0.024, 20,
-        );
-        const dx = this.isChinchilla ? e.s * 0.08 : 0;
-        const dz = this.isChinchilla ? this.surfaceZ(0.33, 0.105) - this.surfaceZ(0.25, 0.105) : 0;
-        e.closedArc.position.set(dx, 0, dz);
-        e.squintSlit.position.set(dx, 0, dz);
-      }
       (e.mat.uniforms.uEyeTop.value as THREE.Color).set(p.eyeTop);
       (e.mat.uniforms.uEyeBottom.value as THREE.Color).set(p.eyeBottom);
       (e.mat.uniforms.uPupilCol.value as THREE.Color).set(p.pupil);
@@ -1699,6 +2120,10 @@ export class KuroCatEngine3D {
 
   public setKeyboardConfig(layout: KeyboardLayoutId, orient: KeyboardOrientation): void {
     this.desk.rebuildBoard(layout, orient);
+    if (this.isChinchilla) {
+      markStickerLayer(this.scene);
+      this.seatChinchilla();
+    }
     this.paws.L.keyId = null;
     this.paws.R.keyId = null;
     this.tailTap.keyId = null;
@@ -1826,16 +2251,23 @@ export class KuroCatEngine3D {
         : !this.isCross &&
           this.tailKeyMode !== 'off' &&
           (this.desk.isRightEdgeTailKey(k.spec.id) ||
-            (this.tailKeyMode === 'smart' && (k.spec.id === 'space' || k.spec.id === 'enter')));
+            // The chinchilla's fluffy tail only helps out nearby; stretched across it would hide the keys.
+            (this.tailKeyMode === 'smart' && !this.isChinchilla && (k.spec.id === 'space' || k.spec.id === 'enter')));
     if (useTail) {
       this.triggerTailKey(k.spec.id, k.spec.bubble || k.spec.label || k.spec.id);
       return;
     }
 
     const mousingNow = this.isMousing();
-    const isLeftSideScreen = k.x < 0.05;
-    const pawKey: 'L' | 'R' = mousingNow ? 'R' : isLeftSideScreen ? 'L' : 'R';
+    // Each chinchilla paw looks after its own side, so the arms stay short and uncrossed.
+    const isLeftSideScreen = this.isChinchilla
+      ? this.desk.keyTopWorld(k.spec.id, this.tmpV1).x < this.homePos.x
+      : k.x < 0.05;
+    let pawKey: 'L' | 'R' = mousingNow ? 'R' : isLeftSideScreen ? 'L' : 'R';
+    const splitSpace = this.isChinchilla && k.spec.id === 'space';
+    if (splitSpace && !mousingNow) pawKey = this.lastSpacePaw = this.lastSpacePaw === 'L' ? 'R' : 'L';
     const paw = this.paws[pawKey];
+    paw.keyDx = splitSpace ? paw.side * 0.19 : 0;
     paw.from.copy(paw.pos);
     paw.keyId = k.spec.id;
     paw.t0 = this.elapsed;
@@ -1984,7 +2416,7 @@ export class KuroCatEngine3D {
         }
         return true;
       });
-      overHead = Boolean(hit && hit.point.y >= 1.0);
+      overHead = Boolean(hit && hit.point.y >= (this.isChinchilla ? 0.78 : 1.0));
       if (overHead) {
         this.petting = true;
         this.petUntil = this.elapsed + 0.30;
@@ -2063,6 +2495,7 @@ export class KuroCatEngine3D {
     this.tailTap.dur = 0.135;
     this.tailTap.down = true;
     this.tailTap.landAt = this.elapsed;
+    this.chinTailWant = this.desk.keyTopWorld(keyId, this.tmpV1).x < this.homePos.x - 0.12 ? -1 : 1;
     this.desk.setKeyDown(keyId, true);
     this.sSquash.kick(0.24);
     if (this.showKeyBubbles) {
@@ -2075,7 +2508,7 @@ export class KuroCatEngine3D {
 
   private spawnKeyPopup(keyId: string, label: string, side: -1 | 1): void {
     const clean = label.length > 6 ? label.slice(0, 6) : label;
-    const { tex, aspect } = getPopupTexture(clean);
+    const { tex, aspect } = getPopupTexture(clean, this.isChinchilla);
     const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
     const sprite = new THREE.Sprite(mat);
     const baseH = 0.25;
@@ -2119,7 +2552,7 @@ export class KuroCatEngine3D {
     this.lastSlam = this.elapsed;
     this.sDeskHop.kick(0.70);
     this.sSquash.kick(0.32);
-    const impact = this.tailCurve.points[this.tailCurve.points.length - 1];
+    const impact = this.isChinchilla ? this.chinTailImpact : this.tailCurve.points[this.tailCurve.points.length - 1];
     this.spawnFx('bang', new THREE.Vector3(impact.x, impact.y + 0.08, impact.z + 0.04), new THREE.Vector3(0, 0.08, 0), 0.34, 0.22);
     for (const side of [-1, 1] as const) {
       this.spawnFx(
@@ -2250,7 +2683,8 @@ export class KuroCatEngine3D {
     this.desk.update(dt, this.leftMouseDown, this.rightMouseDown, deskHopY, this.privacyClose);
 
     // 4) Spine lean, hunch, squash & breathing on continuous one-piece body
-    const mousing = this.isMousing();
+    // Being petted beats holding the mouse: the chinchilla wants both paws for its heart.
+    const mousing = this.isMousing() && !(this.isChinchilla && petActive);
     const typingActive = t - this.lastKey < 0.65 || this.paws.L.down || this.paws.R.down;
     const striking =
       this.paws.L.down && (!this.paws.R.down || this.paws.L.t0 >= this.paws.R.t0)
@@ -2277,10 +2711,25 @@ export class KuroCatEngine3D {
       curious * 0.04 +
       Math.sin(t * 2.0) * 0.014;
 
-    this.bend.x = this.sShift.step(targetShift, dt);
-    this.bend.z = this.sHunch.step(targetHunch, dt);
-    this.bend.squash = this.sSquash.step(targetSquash, dt);
-    this.bend.bellySwell = this.sleepAmt * 0.095 + (typingActive ? 0.035 : 0);
+    if (this.isChinchilla) {
+      const shift = this.sShift.step(targetShift * 0.28, dt);
+      const hunch = this.sHunch.step(targetHunch * 0.28, dt);
+      const bob = this.sSquash.step(
+        this.sleepAmt * 0.06 + (petActive ? 0.012 : 0) - curious * 0.01 + Math.sin(t * 2.0) * 0.005,
+        dt,
+      );
+      this.bend.x = 0;
+      this.bend.z = 0;
+      this.bend.squash = 0;
+      this.bend.bellySwell = 0;
+      // The body takes a share of the head's turn (last frame's is close enough).
+      this.poseChinchillaRoot(shift, hunch, clamp(bob, -0.016, 0.076), this.headRot.yaw * 0.6);
+    } else {
+      this.bend.x = this.sShift.step(targetShift, dt);
+      this.bend.z = this.sHunch.step(targetHunch, dt);
+      this.bend.squash = this.sSquash.step(targetSquash, dt);
+      this.bend.bellySwell = this.sleepAmt * 0.095 + (typingActive ? 0.035 : 0);
+    }
 
     // 5) Head pose & silky eye tracking
     const gx = Math.tanh(this.cursorNdc.x * 1.45);
@@ -2332,9 +2781,15 @@ export class KuroCatEngine3D {
     const wakeEl = t - this.wakeAt;
     const wakeShake = wakeEl >= 0 && wakeEl < 0.55 ? Math.sin(wakeEl * 36) * 0.20 * (1 - wakeEl / 0.55) : 0;
 
+    if (this.isChinchilla) {
+      // Small turns that keep the eyes level on screen; only a real head tilt shows as one.
+      targetYaw = clamp(targetYaw * 0.62, -0.17, 0.17);
+      targetRoll = clamp(targetRoll * 0.3, -0.054, 0.054) - targetYaw * 0.22;
+      targetPitch = this.asleep ? 0.05 : clamp(targetPitch * 0.5, -0.09, 0.05) + CHINCHILLA.headPitch;
+    }
     this.headRot.pitch = this.sPitch.step(targetPitch, dt);
-    this.headRot.yaw = this.sYaw.step(targetYaw, dt);
-    this.headRot.roll = this.sRoll.step(targetRoll, dt) + wakeShake;
+    this.headRot.yaw = this.sYaw.step(targetYaw, dt) * (this.isChinchilla ? 0.62 : 1);
+    this.headRot.roll = this.sRoll.step(targetRoll, dt) + wakeShake * (this.isChinchilla ? 0.3 : 1);
 
     // Deform one-piece body+head smoothly & sync headMount + optional collar!
     this.deformCatBody();
@@ -2358,6 +2813,9 @@ export class KuroCatEngine3D {
       this.headsetLedMat.color.setRGB(r, g, b);
       const micPulse = 0.78 + 0.22 * Math.sin(t * 3.8);
       this.headsetMicLedMat.color.setRGB(0.22 * micPulse, 0.97 * micPulse, 0.82 * micPulse);
+      if (this.isChinchilla && this.chin) {
+        this.chin.headsetLed.color.set(CHIN_HEADSET.led).lerp(this.tmpWhite, 0.16 + 0.16 * Math.sin(t * 2.6));
+      }
     } else {
       this.headsetGroup.visible = false;
     }
@@ -2377,12 +2835,19 @@ export class KuroCatEngine3D {
     for (const e of this.ears) {
       const flick = act && act.kind === 'ear' && act.side === e.s ? earFlick : 0;
       const airplaneFold = cross * 0.56;
+      if (this.isChinchilla) {
+        e.group.rotation.z = -e.s * (CHINCHILLA.earLean + airplaneFold * 0.9 - earState * 0.5 + flick);
+        e.group.rotation.x = -0.10 - cross * 0.10 + curious * 0.06;
+        e.group.position.set(
+          e.s * (CHINCHILLA.earX + cross * 0.05),
+          CHINCHILLA.earY - cross * 0.07,
+          CHINCHILLA.earZ,
+        );
+        continue;
+      }
       e.group.rotation.z = -e.s * (e.tilt + airplaneFold - earState * 0.28 + flick);
       e.group.rotation.x = -0.06 - cross * 0.14 + curious * 0.10;
-      e.group.position.set(
-        e.s * ((this.isChinchilla ? 0.49 : 0.35) + cross * 0.06),
-        (this.isChinchilla ? 0.33 : 0.255) - cross * 0.045, -0.015,
-      );
+      e.group.position.set(e.s * (0.35 + cross * 0.06), 0.255 - cross * 0.045, -0.015);
     }
 
     // 7) Iconic KuroCat Eyes: open / curious / grumpy zero-seam / petting lazy slits / sleep arcs
@@ -2402,7 +2867,7 @@ export class KuroCatEngine3D {
     const isBlinkClosed = !isSleepOrPrivacy && !isPetSquint && blinkClose > 0.58;
     const showOpenEye = !isSleepOrPrivacy && !isPetSquint && !isBlinkClosed;
 
-    this.blushMat.opacity += ((petActive ? 0.46 : 0) - this.blushMat.opacity) * approach(8, dt);
+    this.blushMat.opacity += ((petActive ? (this.isChinchilla ? 0.26 : 0.46) : 0) - this.blushMat.opacity) * approach(8, dt);
     if (this.blushMat.opacity < 0.004 && !petActive) this.blushMat.opacity = 0;
     const showBlush = this.blushMat.opacity > 0.004;
     catAudio.setPurrIntensity(petActive ? 0.85 : 0);
@@ -2416,6 +2881,16 @@ export class KuroCatEngine3D {
       e.mesh.visible = showOpenEye;
       e.closedArc.visible = isSleepOrPrivacy || isBlinkClosed;
       e.squintSlit.visible = isPetSquint;
+
+      if (showOpenEye && this.isChinchilla && this.chin) {
+        const u = this.chin.eyes[this.eyes.indexOf(e)].mat.uniforms;
+        const k = (1 + curious * 0.14) / CHINCHILLA.eyePatch;
+        (u.uScale.value as THREE.Vector2).set(k, Math.max(0.06, k * (1 - blinkClose * 0.92)));
+        (u.uGaze.value as THREE.Vector2).set(gazeX, gazeY);
+        u.uCross.value = cross;
+        u.uCurious.value = curious;
+        continue;
+      }
 
       if (showOpenEye) {
         const irisRx = 0.156 * (1 + curious * 0.06);
@@ -2441,6 +2916,20 @@ export class KuroCatEngine3D {
         e.mat.uniforms.uCurious.value = curious;
         e.mat.uniforms.uShineAmt.value = shineAmt;
       }
+    }
+
+    if (this.isChinchilla && this.chin) {
+      const { smile, frown, oh, open } = this.chin.face;
+      const happy =
+        Math.max(smoothstep(0.3, 0.7, this.squintAmt), smoothstep(0.45, 0.8, this.excite)) * clamp(1 - cross * 2, 0, 1);
+      frown.visible = cross > 0.5;
+      oh.visible = !frown.visible && curious > 0.55;
+      smile.visible = !frown.visible && !oh.visible;
+      open.visible = smile.visible && happy > 0.05;
+      open.scale.set(1, Math.max(0.1, happy), 1);
+      const wantHug = petActive && !typingActive ? 1 : 0;
+      this.hugAmt += (wantHug - this.hugAmt) * approach(9, dt);
+      if (this.hugAmt < 0.002 && !wantHug) this.hugAmt = 0;
     }
 
     // 8) Graceful 3D KuroCat Tail (sway, sleep curl, tail key patting, 3-beat grumpy desk-thump)
@@ -2489,29 +2978,39 @@ export class KuroCatEngine3D {
       pt.lerpVectors(attached, loose, smoothstep(0.1, 0.7, w));
     }
 
-    if (this.tailTap.reach > 0.01 && this.tailTap.keyId) {
+    const tailActive = this.tailTap.down || t - this.tailTap.landAt < 0.28;
+    // The chinchilla's tail comes round on the key's side; to change sides it first goes back behind the body.
+    const tailTurning = this.isChinchilla && tailActive && this.chinTailWant !== this.chinTailSide && this.tailTap.reach > 0.12;
+    if (tailActive && !tailTurning) this.chinTailSide = this.chinTailWant;
+
+    if (this.tailTap.reach > 0.01 && this.tailTap.keyId && !tailTurning) {
       const tipWorld = this.desk.keyTopWorld(this.tailTap.keyId, this.tailTap.tip);
       tipWorld.y += this.tailTap.hover + 0.045;
       const root = this.tailCurve.points[0];
-      this.tmpTailPath[0].set(root.x + 0.36, 0.28, root.z + 0.22);
-      this.tmpTailPath[1].set(tipWorld.x + 0.36, 0.30, mix(root.z, tipWorld.z, 0.52));
-      this.tmpTailPath[2].set(tipWorld.x + 0.26, 0.32, tipWorld.z - 0.06);
-      this.tmpTailPath[3].set(tipWorld.x + 0.12, mix(0.32, tipWorld.y + 0.02, 0.5), tipWorld.z + 0.02);
-      for (let i = 1; i < this.tailCurve.points.length; i++) {
-        const dst = i - 1 < 4 ? this.tmpTailPath[i - 1] : tipWorld;
-        this.tailCurve.points[i].lerp(dst, this.tailTap.reach);
+      if (!this.isChinchilla) {
+        this.tmpTailPath[0].set(root.x + 0.36, 0.28, root.z + 0.22);
+        this.tmpTailPath[1].set(tipWorld.x + 0.36, 0.30, mix(root.z, tipWorld.z, 0.52));
+        this.tmpTailPath[2].set(tipWorld.x + 0.26, 0.32, tipWorld.z - 0.06);
+        this.tmpTailPath[3].set(tipWorld.x + 0.12, mix(0.32, tipWorld.y + 0.02, 0.5), tipWorld.z + 0.02);
+        for (let i = 1; i < this.tailCurve.points.length; i++) {
+          const dst = i - 1 < 4 ? this.tmpTailPath[i - 1] : tipWorld;
+          this.tailCurve.points[i].lerp(dst, this.tailTap.reach);
+        }
       }
     }
 
-    const tailActive = this.tailTap.down || t - this.tailTap.landAt < 0.28;
-    this.tailTap.reach += ((tailActive ? 1 : 0) - this.tailTap.reach) * approach(tailActive ? 24 : 9, dt);
+    this.tailTap.reach +=
+      ((tailActive && !tailTurning ? 1 : 0) - this.tailTap.reach) * approach(tailTurning ? 40 : tailActive ? 24 : 9, dt);
     const tailHoverTarget = this.tailTap.down ? 0 : 0.095;
     this.tailTap.hover += (tailHoverTarget - this.tailTap.hover) * approach(34, dt);
 
-    this.tailLimb.update(
-      (u, out) => this.tailCurve.getPoint(u, out),
-      (u) => mix(this.isChinchilla ? 0.105 : 0.068, this.isChinchilla ? 0.073 : 0.044, u) * (1 - 0.12 * Math.sin(u * Math.PI)),
-    );
+    if (this.isChinchilla) this.updateChinchillaTail(cross);
+    else {
+      this.tailLimb.update(
+        (u, out) => this.tailCurve.getPoint(u, out),
+        (u) => mix(0.068, 0.044, u) * (1 - 0.12 * Math.sin(u * Math.PI)),
+      );
+    }
 
     // 9) Sleek Unified KuroCat Arms + Cozy Tucked Idle Belly Paws!
     const updatePaw = (paw: PawTrack3D, isLeft: boolean) => {
@@ -2521,16 +3020,25 @@ export class KuroCatEngine3D {
       paw.tuckWeight += (wantTuck - paw.tuckWeight) * approach(wantTuck ? 6.5 : 22, dt);
 
       this.tmpPawLocal.set(paw.side * 0.24, 0.40 - this.sleepAmt * 0.06, 0.54);
-      const tuckHome = this.attachLocal(this.tmpPawLocal, this.tmpV3);
+      const tuckHome = this.isChinchilla
+        ? this.chinchillaPawHome(paw.side, this.tmpV3)
+        : this.attachLocal(this.tmpPawLocal, this.tmpV3);
+
+      if (this.isChinchilla) {
+        // Lift over the keyboard's corner while travelling between the mouse and the desk.
+        tuckHome.y += Math.min(0.16, Math.hypot(paw.pos.x - tuckHome.x, paw.pos.z - tuckHome.z) * 0.36) * (1 - this.privacyClose);
+      }
 
       if (activeForMouse) {
-        const mt = this.desk.mouseTopWorld(this.tmpV1);
+        const mt = this.isChinchilla ? this.desk.mouseGripWorld(this.tmpV1) : this.desk.mouseTopWorld(this.tmpV1);
+        if (this.isChinchilla) mt.y += Math.min(0.2, Math.hypot(paw.pos.x - mt.x, paw.pos.z - mt.z) * 0.4);
         paw.pos.copy(paw.spring.step(mt, dt));
         paw.last.copy(paw.pos);
         return;
       }
       if (activeForKey && paw.keyId) {
         const kt = this.desk.keyTopWorld(paw.keyId, this.tmpV1);
+        kt.x += paw.keyDx;
         if (paw.down) {
           const u = clamp((t - paw.t0) / paw.dur, 0, 1);
           paw.pos.lerpVectors(paw.from, kt, smoothstep(0, 1, u));
@@ -2554,11 +3062,14 @@ export class KuroCatEngine3D {
 
     for (const arm of this.arms) {
       const pawTrack = arm.s < 0 ? this.paws.L : this.paws.R;
-      this.attachLocal(arm.shoulderLocal, arm.shoulder);
-      arm.hand.copy(pawTrack.pos);
-
       const tuck = pawTrack.tuckWeight;
       const onMouse = arm.s < 0 && mousing;
+      arm.hand.copy(pawTrack.pos);
+      if (this.isChinchilla && this.chin) {
+        this.updateChinchillaArm(arm.s < 0 ? 0 : 1, arm, tuck, onMouse, dt);
+        continue;
+      }
+      this.attachLocal(arm.shoulderLocal, arm.shoulder);
       const reach = arm.shoulder.distanceTo(arm.hand);
       const lift = mix(0.24, 0.06, clamp((reach - 0.85) / 0.85, 0, 1)) * (1 - tuck * 0.65);
 
@@ -2575,7 +3086,6 @@ export class KuroCatEngine3D {
         mix(0.12, 0.02, tuck),
       );
       arm.c2.copy(arm.shoulder).lerp(arm.hand, 0.72).add(this.tmpArmOff);
-
       arm.limb.update(
         (u, out) => {
           const m = 1 - u;
@@ -2594,12 +3104,22 @@ export class KuroCatEngine3D {
       // Soft sculpted plush paw resting cleanly right behind top edge of keyboard when calm
       const pawScale = mix(1.0, 0.94, tuck);
       arm.paw.position.set(arm.hand.x, arm.hand.y - 0.010, arm.hand.z + 0.014);
-      arm.paw.scale.set(
-        (this.isChinchilla ? 0.095 : 0.126) * pawScale,
-        (this.isChinchilla ? 0.065 : 0.080) * pawScale,
-        (this.isChinchilla ? 0.102 : 0.118) * pawScale,
-      );
+      arm.paw.scale.set(0.126 * pawScale, 0.080 * pawScale, 0.118 * pawScale);
       arm.paw.rotation.y = Math.atan2(arm.hand.x - arm.c2.x, Math.max(0.1, arm.hand.z - arm.c2.z)) * 0.42;
+    }
+
+    if (this.isChinchilla && this.chin) {
+      const { heart } = this.chin;
+      const both = Math.min(this.paws.L.tuckWeight, this.paws.R.tuckWeight);
+      const love = this.hugAmt * both * (1 - this.privacyClose);
+      heart.visible = love > 0.02;
+      if (heart.visible) {
+        const hy = 70 * CHIN_PX;
+        this.tmpPawLocal.set(0, hy, chinchillaSurfaceZ(0, hy) + 0.12);
+        this.attachLocal(this.tmpPawLocal, heart.position);
+        heart.scale.setScalar(30 * CHIN_PX * CHINCHILLA.scale * love * (1 + Math.sin(t * 6.5) * 0.045));
+        heart.rotation.set(-0.28, 0, 0);
+      }
     }
 
     // 10) Floating Key Bubbles, Anger Mark 💢 & Sleep Zzz FX
@@ -2625,7 +3145,9 @@ export class KuroCatEngine3D {
       this.angerSprite.visible = true;
       const pulse = 1 + 0.10 * Math.sin(t * 14) + (t - this.lastSlam < 0.22 ? 0.16 : 0);
       this.headMount.updateMatrixWorld(false);
-      this.tmpFxPos.set(-0.52, 0.44, 0.18).applyMatrix4(this.headMount.matrixWorld);
+      if (this.isChinchilla) this.tmpFxPos.set(-0.78, 0.92, 0.2);
+      else this.tmpFxPos.set(-0.52, 0.44, 0.18);
+      this.tmpFxPos.applyMatrix4(this.headMount.matrixWorld);
       this.angerSprite.position.copy(this.tmpFxPos);
       this.angerSprite.scale.setScalar(0.30 * pulse * smoothstep(0.25, 0.65, cross));
     } else {
@@ -2635,7 +3157,9 @@ export class KuroCatEngine3D {
     if (this.sleepAmt > 0.65 && t >= this.nextZ) {
       this.nextZ = t + 1.35;
       this.headMount.updateMatrixWorld(false);
-      const zPos = this.tmpFxPos.set(0.46, 0.42, 0.16).applyMatrix4(this.headMount.matrixWorld);
+      if (this.isChinchilla) this.tmpFxPos.set(0.82, 0.80, 0.2);
+      else this.tmpFxPos.set(0.46, 0.42, 0.16);
+      const zPos = this.tmpFxPos.applyMatrix4(this.headMount.matrixWorld);
       this.spawnFx('z', zPos, new THREE.Vector3(0.08, 0.36, 0), 0.22, 2.3);
     }
 

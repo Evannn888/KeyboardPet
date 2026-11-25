@@ -6,6 +6,7 @@ import {
   type KeySpec,
 } from './keyboardLayout';
 import type { KeyboardOrientation } from './catEngine';
+import { CHIN_DESK } from './chinchillaStyle';
 
 export class Spring1D {
   public x: number;
@@ -257,6 +258,96 @@ export class TaperTube3D {
   }
 }
 
+/** `tea` is the milk-tea desk set that comes with the chinchilla. */
+export type DeskTheme = 'classic' | 'tea';
+
+interface DeskPalette {
+  key: string;
+  mod: string;
+  accent: string;
+  legend: string;
+  keySide: string;
+  modSide: string;
+  accentSide: string;
+  chassis: string;
+  bezel: string;
+  plate: string;
+  mouse: string;
+  mouseSkirt: string;
+  mouseSeam: string;
+  wheel: string;
+}
+
+const DESK_PALETTES: Record<DeskTheme, DeskPalette> = {
+  classic: {
+    key: '#f9f8f3',
+    mod: '#e6e4db',
+    accent: '#f59b2e',
+    legend: '#2b2d34',
+    keySide: '#dad7cd',
+    modSide: '#c4c0b4',
+    accentSide: '#c4741a',
+    chassis: '#202229',
+    bezel: '#2c2f38',
+    plate: '#181a20',
+    mouse: '#ffffff',
+    mouseSkirt: '#b7b5ac',
+    mouseSeam: '#8e9099',
+    wheel: '#555966',
+  },
+  tea: {
+    key: CHIN_DESK.key,
+    mod: CHIN_DESK.mod,
+    accent: CHIN_DESK.accent,
+    legend: '#4a3a31',
+    keySide: CHIN_DESK.keySide,
+    modSide: CHIN_DESK.modSide,
+    accentSide: CHIN_DESK.accentSide,
+    chassis: CHIN_DESK.side,
+    bezel: CHIN_DESK.chassisEdge,
+    plate: '#a58e7a',
+    mouse: '#fff5ea',
+    mouseSkirt: CHIN_DESK.side,
+    mouseSeam: CHIN_DESK.chassis,
+    wheel: CHIN_DESK.accent,
+  },
+};
+
+/** Where the desk set stands. The chinchilla's is squared up, a little smaller and leaves the mouse room to move. */
+interface DeskPlacement {
+  board: readonly [number, number, number];
+  boardYaw: number;
+  boardScale: number;
+  mouse65: readonly [number, number, number];
+  mouse108: readonly [number, number, number];
+  mouseYaw: number;
+  mouseScale: number;
+  mouseTravel: readonly [number, number];
+}
+
+const DESK_PLACEMENT: Record<DeskTheme, DeskPlacement> = {
+  classic: {
+    board: [0.24, 0.11, 1.08],
+    boardYaw: -0.042,
+    boardScale: 1,
+    mouse65: [-1.16, 0.015, 0.96],
+    mouse108: [-1.46, 0.015, 0.96],
+    mouseYaw: -0.1,
+    mouseScale: 1,
+    mouseTravel: [0.22, 0.14],
+  },
+  tea: {
+    board: [0.25, 0.11, 1.06],
+    boardYaw: 0,
+    boardScale: 0.93,
+    mouse65: [-1.14, 0.015, 0.8],
+    mouse108: [-1.40, 0.015, 0.8],
+    mouseYaw: 0,
+    mouseScale: 0.88,
+    mouseTravel: [0.1, 0.12],
+  },
+};
+
 interface KeyEntry3D {
   spec: KeySpec;
   index: number;
@@ -287,8 +378,10 @@ function getKeycapAtlas(
   layoutId: KeyboardLayoutId,
   keys: readonly KeySpec[],
   rotated180: boolean,
+  theme: DeskTheme,
 ): KeyAtlasData {
-  const cacheKey = `${layoutId}|${rotated180 ? 1 : 0}`;
+  const pal = DESK_PALETTES[theme];
+  const cacheKey = `${layoutId}|${rotated180 ? 1 : 0}|${theme}`;
   const cached = keyAtlasCache.get(cacheKey);
   if (cached) return cached;
 
@@ -320,7 +413,7 @@ function getKeycapAtlas(
   c.width = atlasW;
   c.height = atlasH;
   const g = c.getContext('2d')!;
-  g.fillStyle = '#f9f8f3';
+  g.fillStyle = pal.key;
   g.fillRect(0, 0, atlasW, atlasH);
 
   const rects = new Map<string, [number, number, number, number]>();
@@ -335,7 +428,7 @@ function getKeycapAtlas(
     const oy = row * CELL;
 
     g.fillStyle =
-      item.accent === 'orange' ? '#f59b2e' : item.accent === 'mod' ? '#e6e4db' : '#f9f8f3';
+      item.accent === 'orange' ? pal.accent : item.accent === 'mod' ? pal.mod : pal.key;
     g.fillRect(ox, oy, CELL, CELL);
 
     // Sculpted concave PBT keycap sheen
@@ -352,7 +445,7 @@ function getKeycapAtlas(
       const len = item.label.length;
       const fontSize = len >= 4 ? 29 : len === 3 ? 35 : len === 2 ? 42 : 52;
       g.font = `700 ${fontSize}px "Segoe UI", system-ui, sans-serif`;
-      g.fillStyle = item.accent === 'orange' ? '#ffffff' : '#2b2d34';
+      g.fillStyle = item.accent === 'orange' ? '#ffffff' : pal.legend;
       g.textAlign = 'center';
       g.textBaseline = 'middle';
       g.fillText(item.label, 0, 2);
@@ -373,7 +466,7 @@ function getKeycapAtlas(
   if (orangeOnly.length > 0) {
     // Place orange tiles on the bottom-most atlas row for a full-row mipmap buffer + 10px per-tile padding!
     const orangeRow = Math.floor(atlasH / CELL) - 1;
-    g.fillStyle = '#f59b2e';
+    g.fillStyle = pal.accent;
     g.fillRect(0, orangeRow * CELL, atlasW, CELL);
     for (let i = 0; i < orangeOnly.length; i++) {
       paintTile(orangeOnly[i], i % cols, orangeRow);
@@ -544,6 +637,14 @@ export class KeyboardAndMouse3D {
   private boardH = 0.115;
   private capH = 0.056;
   private boardWidth = 2.4;
+  private boardDepth = 0.89;
+  private theme: DeskTheme = 'classic';
+  private shadowsVisible = true;
+  private kbShadow: THREE.Mesh | null = null;
+  private readonly mouseShadow: THREE.Mesh;
+  private readonly mouseSkirtMat = new THREE.MeshBasicMaterial({ color: '#b7b5ac' });
+  private readonly mouseSeamMat = new THREE.MeshBasicMaterial({ color: '#8e9099', depthTest: true });
+  public readonly mouseDome: THREE.Mesh;
 
   // Scratch objects (zero per-frame GC allocations)
   private readonly tmpPos = new THREE.Vector3();
@@ -625,22 +726,22 @@ export class KeyboardAndMouse3D {
     }
     domeGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
 
-    const mouseShadow = new THREE.Mesh(
+    const mouseShadow = (this.mouseShadow = new THREE.Mesh(
       new THREE.PlaneGeometry(MW * 3.1, ML * 2.8),
       new THREE.MeshBasicMaterial({ map: this.shadowTex, transparent: true, depthWrite: false, opacity: 0.78 }),
-    );
+    ));
     mouseShadow.rotation.x = -Math.PI / 2;
     mouseShadow.position.set(0, 0.002, 0.012);
 
     const baseSkirt = new THREE.Mesh(
       new THREE.CylinderGeometry(MW * 0.96, MW * 0.92, 0.018, 24),
-      new THREE.MeshBasicMaterial({ color: '#b7b5ac' }),
+      this.mouseSkirtMat,
     );
     baseSkirt.scale.set(1, 1, ML / MW);
     baseSkirt.position.y = 0.008;
 
     this.mouseBodyMat = new THREE.MeshBasicMaterial({ vertexColors: true, color: '#ffffff' });
-    const dome = new THREE.Mesh(domeGeo, this.mouseBodyMat);
+    const dome = (this.mouseDome = new THREE.Mesh(domeGeo, this.mouseBodyMat));
     dome.scale.set(MW, MH, ML);
     dome.position.y = 0.012;
 
@@ -651,7 +752,7 @@ export class KeyboardAndMouse3D {
         Math.sqrt(Math.max(0, 1 - (x / (MW * (1 - (0.07 * z) / ML))) ** 2 - (z / ML) ** 2));
 
     // Merge vertical & horizontal mouse seams into a single static draw call
-    const seamMat = new THREE.MeshBasicMaterial({ color: '#8e9099', depthTest: true });
+    const seamMat = this.mouseSeamMat;
     const vSeam = new TaperTube3D(12, 4, seamMat, 6);
     vSeam.update(
       (t, out) => {
@@ -775,8 +876,48 @@ export class KeyboardAndMouse3D {
   public setStyle(style: '3d' | '2d'): void {
     const is3D = style === '3d';
     this.mouseBodyMat.vertexColors = is3D;
-    this.mouseBodyMat.color.set(is3D ? '#ffffff' : '#f4f4f0');
+    this.mouseBodyMat.color.set(is3D ? DESK_PALETTES[this.theme].mouse : '#f4f4f0');
     this.mouseBodyMat.needsUpdate = true;
+  }
+
+  /** Recolours the keyboard and mouse; a no-op when nothing changes. */
+  public setTheme(theme: DeskTheme): void {
+    if (theme === this.theme) return;
+    this.theme = theme;
+    const pal = DESK_PALETTES[theme];
+    this.sideColorBase.set(pal.keySide);
+    this.sideColorMod.set(pal.modSide);
+    this.sideColorOrange.set(pal.accentSide);
+    this.mouseBodyMat.color.set(pal.mouse);
+    this.mouseSkirtMat.color.set(pal.mouseSkirt);
+    this.mouseSeamMat.color.set(pal.mouseSeam);
+    const place = DESK_PLACEMENT[theme];
+    this.boardGroup.rotation.y = place.boardYaw;
+    this.boardGroup.scale.setScalar(place.boardScale);
+    this.mouseGroup.scale.setScalar(place.mouseScale);
+    this.sideInstanced = null;
+    this.rebuildBoard(this.layoutId, this.orientation);
+  }
+
+  /** Soft contact shadows are hidden when the sticker border brings its own. */
+  public setShadowsVisible(visible: boolean): void {
+    this.shadowsVisible = visible;
+    if (this.kbShadow) this.kbShadow.visible = visible;
+    this.mouseShadow.visible = visible;
+  }
+
+  /** Where a hand holds the mouse from the pet's side, leaving the near half in view. */
+  public mouseGripWorld(out: THREE.Vector3): THREE.Vector3 {
+    this.deskGroup.updateMatrixWorld(false);
+    this.mouseGroup.updateMatrixWorld(false);
+    return out.set(0, 0.1, -0.1).applyMatrix4(this.mouseGroup.matrixWorld);
+  }
+
+  /** Transform of the key tops' plane (y up from the caps), for things that lie on the keys. */
+  public keyPlane(out: THREE.Matrix4): THREE.Matrix4 {
+    this.deskGroup.updateMatrixWorld(false);
+    this.boardGroup.updateMatrixWorld(false);
+    return out.makeTranslation(0, this.boardH + 0.008 + this.capH, 0).premultiply(this.boardGroup.matrixWorld);
   }
 
   public rebuildBoard(layoutId: KeyboardLayoutId, orientation: KeyboardOrientation): void {
@@ -803,9 +944,11 @@ export class KeyboardAndMouse3D {
     const isCatFacing = orientation === 'cat';
 
     // Sync mouse orientation (180° cat-facing vs 0° viewer-facing)
-    this.mouseShape.rotation.y = isCatFacing ? -0.10 : Math.PI - 0.10;
-    this.mouseLabelLMat.map = makeMouseLabelTexture('L', isCatFacing);
-    this.mouseLabelRMat.map = makeMouseLabelTexture('R', isCatFacing);
+    const place = DESK_PLACEMENT[this.theme];
+    this.mouseShape.rotation.y = (isCatFacing ? 0 : Math.PI) + place.mouseYaw;
+    // The letters turn with the mouse, so either way they have to be flipped back upright.
+    this.mouseLabelLMat.map = makeMouseLabelTexture('L', true);
+    this.mouseLabelRMat.map = makeMouseLabelTexture('R', true);
     this.mouseLabelLMat.needsUpdate = true;
     this.mouseLabelRMat.needsUpdate = true;
 
@@ -814,15 +957,19 @@ export class KeyboardAndMouse3D {
     const W = layout.totalUnits * U + 0.14;
     const D = layout.totalRows * U + 0.14;
     this.boardWidth = W;
+    this.boardDepth = D;
     this.boardH = 0.112;
     this.capH = is108 ? 0.048 : 0.056;
 
-    this.boardGroup.position.set(0.24, 0.11, 1.08);
-    this.mouseHome.set(is108 ? -1.46 : -1.16, 0.015, 0.96);
+    this.boardGroup.position.set(...place.board);
+    this.mouseHome.set(...(is108 ? place.mouse108 : place.mouse65));
 
     // Soft grounded desk shadow under keyboard
     const kbShadowGeo = new THREE.PlaneGeometry(W * 1.18, D * 1.38);
     const kbShadow = new THREE.Mesh(kbShadowGeo, this.kbShadowMat);
+    kbShadow.visible = this.shadowsVisible;
+    this.kbShadow = kbShadow;
+    const pal = DESK_PALETTES[this.theme];
     // Counter the board transform to keep its shadow flat on the desk.
     kbShadow.quaternion.copy(this.boardGroup.quaternion).invert();
     kbShadow.position.set(0, 0.002 - this.boardGroup.position.y, 0.025).applyQuaternion(kbShadow.quaternion);
@@ -834,9 +981,9 @@ export class KeyboardAndMouse3D {
     const bezelGeo = makeRoundedSlabGeo(W - 0.014, D - 0.014, 0.014, 0.060, this.boardH - 0.008);
     const plateGeo = makeRoundedSlabGeo(W - 0.062, D - 0.062, 0.008, 0.044, this.boardH + 0.004);
     const chassisGeo = mergeStaticGeometries([
-      { geo: baseGeo, color: '#202229' },
-      { geo: bezelGeo, color: '#2c2f38' },
-      { geo: plateGeo, color: '#181a20' },
+      { geo: baseGeo, color: pal.chassis },
+      { geo: bezelGeo, color: pal.bezel },
+      { geo: plateGeo, color: pal.plate },
     ]);
     baseGeo.dispose();
     bezelGeo.dispose();
@@ -847,7 +994,7 @@ export class KeyboardAndMouse3D {
 
     // Single Texture Atlas + 2 InstancedMeshes for ALL 67 or 108 keycaps (2 draw calls total!)
     const keyCount = layout.keys.length;
-    const atlas = getKeycapAtlas(layoutId, layout.keys, isCatFacing);
+    const atlas = getKeycapAtlas(layoutId, layout.keys, isCatFacing, this.theme);
 
     const sideInst = new THREE.InstancedMesh(this.capSideGeo, this.capSideMat, keyCount);
     sideInst.frustumCulled = false;
@@ -960,6 +1107,10 @@ export class KeyboardAndMouse3D {
     return this.boardWidth;
   }
 
+  public getBoardDepth(): number {
+    return this.boardDepth;
+  }
+
   public resolveKey(vk: number): KeyEntry3D | null {
     const spec = resolveKeyByVk(vk, this.layoutId);
     if (!spec) return null;
@@ -1007,7 +1158,8 @@ export class KeyboardAndMouse3D {
   }
 
   public setMouseNormalized(nx: number, ny: number): void {
-    this.mouseTarget.set((nx - 0.5) * 0.22, 0, (ny - 0.5) * 0.14);
+    const [tx, tz] = DESK_PLACEMENT[this.theme].mouseTravel;
+    this.mouseTarget.set((nx - 0.5) * tx, 0, (ny - 0.5) * tz);
   }
 
   public pulseScrollWheel(): void {
@@ -1102,7 +1254,7 @@ export class KeyboardAndMouse3D {
     if (leftBtn) leftBtn.visible = this.leftPress > 0.005;
     if (rightBtn) rightBtn.visible = this.rightPress > 0.005;
 
-    this.wheelMat.color.set('#555966').lerp(this.hitColor, this.wheelGlow);
+    this.wheelMat.color.set(DESK_PALETTES[this.theme].wheel).lerp(this.hitColor, this.wheelGlow);
 
     const anyPress = Math.max(this.leftPress, this.rightPress);
     this.mouseShape.scale.set(1 + 0.03 * anyPress, 1 - 0.10 * anyPress, 1);

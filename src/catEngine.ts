@@ -10,6 +10,8 @@ import {
 import { catAudio } from './audio';
 import { resolveCustomSkin, type CatSkinConfig, type ResolvedSkin } from './catSkins';
 import { DaFeiYuRenderer, type DaFeiYuLayout } from './dafeiyuRenderer';
+import { Chinchilla2D, type ChinchillaPose2D } from './chinchilla2d';
+import { BODY_H, CHIN_DESK, CHIN_HEADSET, CHINCHILLA_ID, IDLE_PAW, PAW_REST, SEAT_DROP, SEAT_SHIFT, SEAT_SHIFT_108 } from './chinchillaStyle';
 
 export const LOGICAL_W = 420;
 export const LOGICAL_H = 440;
@@ -242,12 +244,14 @@ export class KuroCatEngine {
   public keyboardOrientation: KeyboardOrientation = 'cat';
   public tailKeyMode: TailKeyMode = 'smart';
   private tailKeyIdSet = new Set<string>(DEFAULT_TAIL_KEY_IDS);
+  private chinchillaTailSide: -1 | 1 = 1;
   private tailPickerActive = false;
   private tailPickerSelection: ReadonlySet<string> | null = null;
   private tailPickerHoverId: string | null = null;
   private renderScale = 1.0;
   private embedded = false;
   private dafeiyu = new DaFeiYuRenderer();
+  private readonly chinchilla = new Chinchilla2D();
   private catTail = {
     heldVks: new Set<number>(),
     targetX: 320,
@@ -512,6 +516,9 @@ export class KuroCatEngine {
       return targetPoint.x >= edgeThresholdX;
     }
 
+    // The chinchilla's fluffy tail only helps out nearby; stretched across the board it would hide the keys.
+    if (this.isChinchilla && targetPoint.x < this.kbCenterX + this.kbWidth * 0.2) return false;
+
     // 'smart' (第三只手 · 智能忙碌时出尾):
     // 1) Both hands occupied -> tail leaps in as a real third hand for any extra key!
     let leftHeld = 0;
@@ -576,6 +583,16 @@ export class KuroCatEngine {
       this.mouseBaseX = isBigFish ? 72 : 54;
       this.mouseBaseY = isBigFish ? 322 : 334;
     }
+    if (this.isChinchilla) {
+      // Squared up: it sits straight behind a straight keyboard.
+      this.kbTiltRad = 0;
+      if (this.keyboardLayout === '108') {
+        this.mouseBaseX = 58;
+      } else {
+        this.kbCenterX = 220;
+        this.mouseBaseX = 50;
+      }
+    }
   }
 
   public setCatAppearance(breedId: string, skin?: CatSkinConfig | null): void {
@@ -627,6 +644,10 @@ export class KuroCatEngine {
       this.rightPaw.target = { x: this.catCenterX + 18, y: this.catBaseY };
     }
     this.wakeRendering();
+  }
+
+  private get isChinchilla(): boolean {
+    return this.customSkin?.id === CHINCHILLA_ID;
   }
 
   private buildDaFeiYuLayout(): DaFeiYuLayout {
@@ -1063,6 +1084,11 @@ export class KuroCatEngine {
 
   private getLiveCurledPawPos(paw: PawState, breath: number): Vec2 {
     // Bent forearm elbow -> cute curled paw sitting near lower belly (matches 8.3s / 10.6s!)
+    if (this.isChinchilla) {
+      const rest = this.getChinchillaReadyPaw(paw);
+      const wave = Math.sin(this.elapsed * 12 + (paw.side === 'left' ? 0 : Math.PI));
+      return { x: rest.x, y: rest.y - 4 + wave * (1.4 + this.typingEnergy * 1.8) };
+    }
     const sp = this.spinePoint(0.84, breath);
     const bob = Math.sin(this.elapsed * 12 + (paw.side === 'left' ? 0 : Math.PI)) * (1.5 + this.typingEnergy * 2.0);
     const xOff = paw.side === 'left' ? -24 : 24;
@@ -1070,6 +1096,42 @@ export class KuroCatEngine {
       x: sp.x + xOff,
       y: sp.y + bob,
     };
+  }
+
+  /** Centred behind the keyboard, or behind the letters of a full-size one so the mouse stays near. */
+  private get chinchillaSeatX(): number {
+    return this.catCenterX + (this.keyboardLayout === '108' ? SEAT_SHIFT_108 : SEAT_SHIFT);
+  }
+
+  /** The chinchilla's axis, h px above its seat. It rocks as one piece, so its shape never changes. */
+  private chinchillaSpine(h: number, breath: number, shiftX = 0): Vec2 {
+    const shift = Math.max(-8, Math.min(8, this.spineLean * 7 + this.typingSway * 2.4 + this.strikeRock * 1.2));
+    const rock = shift * 0.0022;
+    const tall =
+      h *
+      (1 -
+        this.sleepAmount * 0.055 -
+        this.typingHunch * 0.012 -
+        this.bodyBob * 0.006 -
+        this.squashSpring.x * 0.012 -
+        breath * 0.0035);
+    return {
+      x: this.chinchillaSeatX + shift * 0.6 + shiftX * (h / BODY_H) + Math.sin(rock) * tall,
+      y: this.kbCenterY - this.kbHeight * 0.5 + SEAT_DROP - Math.cos(rock) * tall,
+    };
+  }
+
+  /** Between keys the paws wait on the keyboard's far edge... */
+  private getChinchillaReadyPaw(paw: PawState): Vec2 {
+    const x = this.chinchillaSeatX + (paw.side === 'left' ? -PAW_REST : PAW_REST);
+    const edge = this.kbCenterY - this.kbHeight * 0.5 + (x - this.kbCenterX) * Math.tan(this.kbTiltRad);
+    return { x, y: edge + 3 + this.kbBounce * 1.1 + this.deskHopY };
+  }
+
+  /** ... and with nothing to do they are tucked up in front of the chest. */
+  private getChinchillaRestPaw(paw: PawState): Vec2 {
+    const c = this.chinchillaSpine(IDLE_PAW.h, 0);
+    return { x: c.x + (paw.side === 'left' ? -IDLE_PAW.x : IDLE_PAW.x), y: c.y };
   }
 
   // ---- Input event handlers ----
@@ -1222,7 +1284,7 @@ export class KuroCatEngine {
       targetPoint = this.projectKeyboardPoint(spaceU, rY + 0.50);
     } else if (activelyMousing) {
       chosen = this.rightPaw;
-    } else if (screenKeyCol < splitCol) {
+    } else if (this.isChinchilla ? rawKeyPt.x < this.chinchillaSeatX : screenKeyCol < splitCol) {
       chosen = this.leftPaw;
     } else {
       chosen = this.rightPaw;
@@ -1342,6 +1404,9 @@ export class KuroCatEngine {
   }
 
   private getMouseButtonColors(): { left: string; right: string; middle: string } {
+    if (this.isChinchilla) {
+      return { left: CHIN_DESK.hit, right: CHIN_DESK.hitRight, middle: CHIN_DESK.hitSide };
+    }
     const primary = this.customSkin
       ? this.customSkin.accentColor
       : this.catBreed === 'dafeiyu'
@@ -1942,8 +2007,17 @@ export class KuroCatEngine {
         this.catTail.active = false;
       }
 
-      const targetReach = this.catTail.active ? 1 : 0;
-      const reachRate = this.catTail.active ? 28 : 9.5;
+      // The chinchilla's tail comes round on the key's side; to change sides it first goes back behind the body.
+      const tailSide = this.isChinchilla && this.catTail.targetX < this.chinchillaSeatX - 12 ? -1 : 1;
+      const turning =
+        this.isChinchilla && this.catTail.active && tailSide !== this.chinchillaTailSide && this.catTail.reach > 0.12;
+      if (this.catTail.active && !turning && tailSide !== this.chinchillaTailSide) {
+        this.chinchillaTailSide = tailSide;
+        this.catTail.tipX = this.catTail.targetX;
+        this.catTail.tipY = this.catTail.targetY;
+      }
+      const targetReach = this.catTail.active && !turning ? 1 : 0;
+      const reachRate = turning ? 40 : this.catTail.active ? 28 : 9.5;
       this.catTail.reach += (targetReach - this.catTail.reach) * (1 - Math.exp(-reachRate * dt));
       if (this.catTail.reach < 0.002 && !this.catTail.active) this.catTail.reach = 0;
 
@@ -1960,7 +2034,7 @@ export class KuroCatEngine {
       const hoverRate = tailAge < 75 ? 45 : tailPressing ? 52 : 16;
       this.catTail.hover += (targetHover - this.catTail.hover) * (1 - Math.exp(-hoverRate * dt));
 
-      const tipFollow = 1 - Math.exp(-34 * dt);
+      const tipFollow = turning ? 0 : 1 - Math.exp(-34 * dt);
       this.catTail.tipX += (this.catTail.targetX - this.catTail.tipX) * tipFollow;
       this.catTail.tipY += (this.catTail.targetY - this.catTail.tipY) * tipFollow;
       this.catTail.impactSquash = Math.max(0, this.catTail.impactSquash - dt * 6.5);
@@ -2102,6 +2176,10 @@ export class KuroCatEngine {
       }
     }
 
+    // Being petted beats holding the mouse: the chinchilla wants both paws for its heart.
+    if (this.isChinchilla && this.squintAmount > 0.3 && this.leftPaw.mode === 'mouse' && !this.mouseLeftDown && !this.mouseRightDown) {
+      this.leftPaw.mode = 'idle';
+    }
     this.updatePaw(this.leftPaw, dt, now);
     this.updatePaw(this.rightPaw, dt, now);
 
@@ -2140,7 +2218,11 @@ export class KuroCatEngine {
       const isCatFacing = this.keyboardOrientation === 'cat';
       const lrBias = this.mouseLeftPress - this.mouseRightPress;
       const anyClickPress = Math.max(this.mouseLeftPress, this.mouseRightPress, this.mouseMiddlePress);
-      if (isCatFacing) {
+      if (this.isChinchilla) {
+        // Held from the pet's side, so the near half of the mouse stays in view.
+        const bias = isCatFacing ? lrBias : -lrBias;
+        paw.target = { x: liveMouseX + 1.5 + bias * 3, y: liveMouseY - 8 + anyClickPress * 2.6 };
+      } else if (isCatFacing) {
         // 180° cat-facing: palm heel at TOP, LMB = inner/+X, RMB = outer/-X
         paw.target = {
           x: liveMouseX + 1.2 + lrBias * 6.4,
@@ -2188,7 +2270,9 @@ export class KuroCatEngine {
       paw.target = this.getLiveCurledPawPos(paw, 0);
     } else if (paw.mode === 'idle') {
       const baseSp = this.spinePoint(1.0, 0);
-      paw.target = { x: baseSp.x + (paw.side === 'left' ? -19 : 19), y: baseSp.y };
+      paw.target = this.isChinchilla
+        ? this.getChinchillaRestPaw(paw)
+        : { x: baseSp.x + (paw.side === 'left' ? -19 : 19), y: baseSp.y };
     }
 
     const wantIdle = paw.mode === 'idle' ? 1 : 0;
@@ -2254,6 +2338,12 @@ export class KuroCatEngine {
       return;
     }
 
+    if (this.isChinchilla) {
+      this.renderChinchilla(ctx, breath, purrShift);
+      ctx.restore();
+      return;
+    }
+
     // Layer 1: Mini mouse & mechanical keyboard (both hop organically on grumpy tail desk-slam!)
     this.drawMiniMouse(ctx);
     this.drawKeyboard(ctx);
@@ -2280,11 +2370,158 @@ export class KuroCatEngine {
     ctx.restore();
   }
 
+  /** Keyboard chassis outline in canvas space (also used to seat the chinchilla behind it). */
+  private traceKeyboardChassis(ctx: CanvasRenderingContext2D, grow = 0): void {
+    ctx.translate(this.kbCenterX, this.kbCenterY + this.kbBounce * 1.1 + this.deskHopY);
+    ctx.rotate(this.kbTiltRad);
+    this.trapezoidPath(
+      ctx,
+      (this.kbWidth * 0.955) / 2 + grow,
+      (this.kbWidth * 1.035) / 2 + grow,
+      -this.kbHeight / 2 - grow,
+      this.kbHeight / 2 + 5.5 + grow,
+      6.5,
+    );
+  }
+
+  private buildChinchillaPose(breath: number, purrShift: number): ChinchillaPose2D {
+    const now = performance.now();
+    const act = this.idleAct;
+    const actU = act ? Math.max(0, Math.min(1, (now - act.t0) / act.dur)) : 0;
+    const flick = (side: -1 | 1) =>
+      act && act.kind === 'ear' && act.side === side ? Math.sin(actU * Math.PI * 3) * 0.3 * (1 - actU) : 0;
+    const slowBlink = act && act.kind === 'slowBlink' ? 0.92 * Math.sin(actU * Math.PI) : 0;
+
+    const spine = (h: number) => this.chinchillaSpine(h, breath, purrShift);
+    const tilt = Math.max(-0.06, Math.min(0.06, this.headTilt * 0.34));
+    const turn = Math.max(-11, Math.min(11, this.faceTurnX * 0.7));
+    const tail = this.computeTailCurve();
+    const wag = this.idleAct?.kind === 'tail' ? Math.sin(actU * Math.PI * 4) * 0.12 * (1 - actU) : 0;
+    const hug = this.chinchillaHug();
+    const tailSide = this.chinchillaTailSide;
+    return {
+      spine,
+      tilt,
+      turn,
+      lookX: this.eyeLookX,
+      lookY: this.eyeLookY,
+      blink: Math.max(this.isBlinking ? 1 - Math.abs(this.blinkProgress - 1) : 0, slowBlink),
+      sleep: this.sleepAmount,
+      privacy: this.privacyClose,
+      squint: this.squintAmount,
+      curious: Math.min(1, this.curiousAmount),
+      cross: this.crossAmount,
+      typing: this.typingEnergy,
+      earPerk: this.earPerkSpring.x,
+      earTwitchL: Math.sin(this.earTwitchLeft * Math.PI) * 0.14 + flick(-1),
+      earTwitchR: Math.sin(this.earTwitchRight * Math.PI) * 0.14 + flick(1),
+      elapsed: this.elapsed,
+      deskTop: this.kbCenterY + this.kbBounce * 1.1 + this.deskHopY - this.kbHeight * 0.5,
+      tail: {
+        end: { x: tail.endX, y: tail.endY },
+        stretch: tail.smoothR,
+        squash: tail.tipSquash,
+        side: tailSide,
+        limit: tailSide > 0 ? this.logicalW - 38 : 38,
+        sway:
+          Math.sin(this.elapsed * (1.1 + this.typingEnergy * 3.2)) *
+            (0.03 + this.typingEnergy * 0.045 + Math.min(1, this.curiousAmount) * 0.05) *
+            (1 - this.sleepAmount * 0.8) *
+            (1 - this.crossAmount) +
+          wag -
+          this.crossAmount * (this.thumpLift * 0.44 - 0.06),
+      },
+      paws: [this.leftPaw, this.rightPaw].map((paw) => {
+        const side = paw.side === 'left' ? (-1 as const) : (1 as const);
+        const press =
+          paw.mode === 'mouse'
+            ? Math.max(this.mouseLeftPress, this.mouseRightPress, this.mouseMiddlePress) * 1.8
+            : 0;
+        // Toes land on the key, so the mitten sits a little above its target.
+        const reach = Math.max(0, 1 - paw.idleWeight - paw.curlWeight);
+        const idle = paw.idleWeight;
+        let x = paw.pos.x;
+        let y = paw.pos.y - 7 * reach + press;
+        let rot = IDLE_PAW.rot * idle;
+        // Only on the keys: none on the chest, the mouse or the desk beside the board.
+        const overKeys = Math.max(0, Math.min(1, (this.kbWidth * 0.5 + 6 - Math.abs(x - this.kbCenterX)) / 18));
+        let shadow = (1 - idle) * overKeys;
+        // Petted: both paws hug a heart.
+        const held = this.chinchilla.hugPoint({ spine }, side);
+        x += (held.x - x) * hug;
+        y += (held.y - y) * hug;
+        rot += (0.8 - rot) * hug;
+        shadow *= 1 - hug;
+        // Passwords: paws over the eyes.
+        const cover = this.chinchilla.eyeCover({ spine, tilt, turn }, side);
+        const k = this.privacyClose;
+        x += (cover.x - x) * k;
+        y += (cover.y - y) * k;
+        rot += (Math.PI - rot) * k;
+        shadow *= 1 - k;
+        const scale = 1 - (1 - IDLE_PAW.scale) * idle;
+        return { side, x, y, rot, shadow, scale, lift: k, idle: Math.max(idle, hug) * (1 - k), chest: Math.max(idle, hug) * (1 - k), squash: paw.impactSquash };
+      }),
+    };
+  }
+
+  /** 0..1 heart-hug while being petted with both paws free. */
+  private chinchillaHug(): number {
+    const free = Math.min(
+      this.leftPaw.idleWeight + this.leftPaw.curlWeight,
+      this.rightPaw.idleWeight + this.rightPaw.curlWeight,
+    );
+    const t = Math.max(0, Math.min(1, (this.squintAmount - 0.25) / 0.5)) * Math.max(0, Math.min(1, free));
+    return t * t * (3 - 2 * t) * (1 - this.privacyClose);
+  }
+
+  private renderChinchilla(ctx: CanvasRenderingContext2D, breath: number, purrShift: number): void {
+    const pose = this.buildChinchillaPose(breath, purrShift);
+    const mouseX = this.mouseBaseX + this.mouseOffsetX;
+    const mouseY = this.mouseBaseY + this.mouseOffsetY + this.deskHopY * 1.35;
+    this.chinchilla.drawBacking(ctx, pose, [
+      (c) => this.traceKeyboardChassis(c),
+      (c) => {
+        c.beginPath();
+        c.ellipse(mouseX, mouseY + 1, 18.5, 24, -0.06, 0, Math.PI * 2);
+      },
+    ]);
+
+    // The seat and the root of the tail are behind the keyboard; only the arms and the tail reach over it.
+    this.chinchilla.drawTail(ctx, pose, 'back');
+    this.chinchilla.drawBody(ctx, pose, {
+      // The shared headset is drawn for the cats' narrower head.
+      back: () => this.drawChinchillaHeadset(ctx, () => this.drawHeadphonesBack(ctx)),
+      front: () => this.drawChinchillaHeadset(ctx, () => this.drawHeadphonesFront(ctx)),
+    });
+    this.drawMiniMouse(ctx);
+    this.drawKeyboard(ctx);
+    const { smoothR, tipSquash } = this.computeTailCurve();
+    this.drawTailContactShadow(ctx, smoothR, tipSquash);
+    this.chinchilla.drawArms(ctx, pose, this.chinchillaHug());
+    this.chinchilla.drawTail(ctx, pose, 'front');
+    this.drawCatAliveFx(ctx, performance.now(), breath);
+    if (this.showKeyBubbles && !this.privacyMode) {
+      this.drawKeyBubbles(ctx);
+      this.drawMouseBadges(ctx);
+    }
+  }
+
+  private drawChinchillaHeadset(ctx: CanvasRenderingContext2D, draw: () => void): void {
+    ctx.save();
+    ctx.translate(0, 4);
+    ctx.scale(1.5, 1.36);
+    draw();
+    ctx.restore();
+  }
+
   private onTailDeskSlam(now: number): void {
     this.lastSlamAt = now;
     const hipRight = this.spinePoint(0.84, 0);
-    const slamX = Math.min(this.logicalW - 22, hipRight.x + 132);
-    const slamY = hipRight.y + 30;
+    const slamX = this.isChinchilla
+      ? this.chinchillaSeatX + 148
+      : Math.min(this.logicalW - 22, hipRight.x + 132);
+    const slamY = this.isChinchilla ? this.kbCenterY - this.kbHeight * 0.5 + 4 : hipRight.y + 30;
 
     // Comic white starburst impact + 3 playful dust puffs!
     this.fxParticles.push({
@@ -2402,7 +2639,18 @@ export class KuroCatEngine {
     }
   }
 
-  private drawTail(ctx: CanvasRenderingContext2D): void {
+  private computeTailCurve(): {
+    startX: number;
+    startY: number;
+    cp1X: number;
+    cp1Y: number;
+    cp2X: number;
+    cp2Y: number;
+    endX: number;
+    endY: number;
+    smoothR: number;
+    tipSquash: number;
+  } {
     // Exact ORIG 0.3s resting tail S-hook, smoothly morphing into:
     //  1) playful arched swan-neck pat onto near-tail keys (catTail.reach),
     //  2) grumpy 3-beat rhythmic desk-thump (crossAmount),
@@ -2495,19 +2743,17 @@ export class KuroCatEngine {
     const cp2Y = restCp2Y + (patCp2Y - restCp2Y) * smoothR;
     const endX = restEndX + (patEndX - restEndX) * smoothR;
     const endY = restEndY + (patEndY - restEndY) * smoothR;
-    const tipAngle = Math.atan2(endY - cp2Y, endX - cp2X);
     const tipSquash = this.catTail.impactSquash * smoothR;
+    return { startX, startY, cp1X, cp1Y, cp2X, cp2Y, endX, endY, smoothR, tipSquash };
+  }
 
-    ctx.save();
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-
+  private drawTailContactShadow(ctx: CanvasRenderingContext2D, smoothR: number, tipSquash: number): void {
     // Subtle tactile contact shadow directly on the keycap when the tail pats down!
     if (smoothR > 0.35) {
       const prox = Math.max(0, 1 - this.catTail.hover / 28);
       const shadowA = smoothR * prox * 0.34;
       if (shadowA > 0.02) {
-        ctx.fillStyle = `rgba(18, 22, 32, ${shadowA.toFixed(3)})`;
+        ctx.fillStyle = `rgba(${this.isChinchilla ? '110, 88, 74' : '18, 22, 32'}, ${shadowA.toFixed(3)})`;
         ctx.beginPath();
         ctx.ellipse(
           this.catTail.tipX,
@@ -2521,6 +2767,17 @@ export class KuroCatEngine {
         ctx.fill();
       }
     }
+  }
+
+  private drawTail(ctx: CanvasRenderingContext2D): void {
+    const { startX, startY, cp1X, cp1Y, cp2X, cp2Y, endX, endY, smoothR, tipSquash } =
+      this.computeTailCurve();
+    const tipAngle = Math.atan2(endY - cp2Y, endX - cp2X);
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    this.drawTailContactShadow(ctx, smoothR, tipSquash);
 
     if (this.customSkin) {
       const s = this.customSkin;
@@ -3090,6 +3347,7 @@ export class KuroCatEngine {
   private drawHeadphonesBack(ctx: CanvasRenderingContext2D): void {
     const hs = Math.max(0, Math.min(1.18, this.headsetSpring.x));
     if (hs <= 0.015) return;
+    const hp = this.isChinchilla ? CHIN_HEADSET : null;
 
     const settled = Math.min(1, hs);
     const dropY = -(1 - settled) * 38;
@@ -3113,13 +3371,13 @@ export class KuroCatEngine {
 
     // Subtle light specular outline so headband reads crisply even on pure Black Cat!
     traceArch(0);
-    ctx.strokeStyle = '#6f7e99';
+    ctx.strokeStyle = hp ? hp.edge : '#6f7e99';
     ctx.lineWidth = 12.2;
     ctx.stroke();
 
     // Matte-charcoal outer headband shell
     traceArch(0);
-    ctx.strokeStyle = '#242a36';
+    ctx.strokeStyle = hp ? hp.shell : '#242a36';
     ctx.lineWidth = 10.0;
     ctx.stroke();
 
@@ -3127,7 +3385,7 @@ export class KuroCatEngine {
     ctx.beginPath();
     ctx.moveTo(-26, -54.2);
     ctx.quadraticCurveTo(0, -58.5, 26, -54.2);
-    ctx.strokeStyle = 'rgba(216, 228, 248, 0.36)';
+    ctx.strokeStyle = hp ? hp.shine : 'rgba(216, 228, 248, 0.36)';
     ctx.lineWidth = 2.0;
     ctx.stroke();
 
@@ -3135,7 +3393,7 @@ export class KuroCatEngine {
     ctx.beginPath();
     ctx.moveTo(-28, -48.5);
     ctx.quadraticCurveTo(0, -52.5, 28, -48.5);
-    ctx.strokeStyle = '#3b4454';
+    ctx.strokeStyle = hp ? hp.pad : '#3b4454';
     ctx.lineWidth = 5.4;
     ctx.stroke();
 
@@ -3144,7 +3402,7 @@ export class KuroCatEngine {
       ctx.beginPath();
       ctx.moveTo(s * 62.5, -14);
       ctx.lineTo(s * 64.0, 2);
-      ctx.strokeStyle = '#a2afc4';
+      ctx.strokeStyle = hp ? hp.metal : '#a2afc4';
       ctx.lineWidth = 6.2;
       ctx.stroke();
     }
@@ -3160,7 +3418,8 @@ export class KuroCatEngine {
     const settled = Math.min(1, hs);
     const dropY = -(1 - settled) * 38;
     const sc = 0.86 + 0.14 * settled + Math.max(0, hs - 1) * 0.12;
-    const led = this.getHeadphoneLedColors();
+    const hp = this.isChinchilla ? CHIN_HEADSET : null;
+    const led = hp ? { ring: hp.led, glow: hp.glow, mic: hp.led } : this.getHeadphoneLedColors();
     const turnShift = this.faceTurnX * 0.25;
 
     ctx.save();
@@ -3176,8 +3435,8 @@ export class KuroCatEngine {
       ctx.rotate(s * 0.09);
 
       // Inner plush memory-foam cheek cushion
-      ctx.fillStyle = '#384050';
-      ctx.strokeStyle = '#1b1f29';
+      ctx.fillStyle = hp ? hp.pad : '#384050';
+      ctx.strokeStyle = hp ? hp.padEdge : '#1b1f29';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.ellipse(-s * 3.5, 0, 10.5, 19.5, 0, 0, Math.PI * 2);
@@ -3186,11 +3445,11 @@ export class KuroCatEngine {
 
       // Domed matte-charcoal outer earcup shell
       const cupGrad = ctx.createLinearGradient(-10, -18, 10, 18);
-      cupGrad.addColorStop(0.0, '#363e4f');
-      cupGrad.addColorStop(0.55, '#242934');
-      cupGrad.addColorStop(1.0, '#191d26');
+      cupGrad.addColorStop(0.0, hp ? '#ffffff' : '#363e4f');
+      cupGrad.addColorStop(0.55, hp ? hp.shell : '#242934');
+      cupGrad.addColorStop(1.0, hp ? hp.shellLow : '#191d26');
       ctx.fillStyle = cupGrad;
-      ctx.strokeStyle = '#8fa0bd';
+      ctx.strokeStyle = hp ? hp.edge : '#8fa0bd';
       ctx.lineWidth = 1.6;
       ctx.beginPath();
       ctx.ellipse(s * 4.2, 0, 10.2, 18.2, 0, 0, Math.PI * 2);
@@ -3221,14 +3480,14 @@ export class KuroCatEngine {
     const mxTip = -22 + this.faceTurnX * 0.55;
     ctx.save();
     ctx.lineCap = 'round';
-    ctx.strokeStyle = '#5c6980';
+    ctx.strokeStyle = hp ? hp.edge : '#5c6980';
     ctx.lineWidth = 4.6;
     ctx.beginPath();
     ctx.moveTo(mx0, 14);
     ctx.quadraticCurveTo(mx0 + 6, 29, mxTip, 23);
     ctx.stroke();
 
-    ctx.strokeStyle = '#1f242f';
+    ctx.strokeStyle = hp ? hp.boom : '#1f242f';
     ctx.lineWidth = 2.8;
     ctx.beginPath();
     ctx.moveTo(mx0, 14);
@@ -3236,14 +3495,14 @@ export class KuroCatEngine {
     ctx.stroke();
 
     // Metallic swivel joint on earcup
-    ctx.fillStyle = '#a2afc4';
+    ctx.fillStyle = hp ? hp.metal : '#a2afc4';
     ctx.beginPath();
     ctx.arc(mx0, 14, 3.0, 0, Math.PI * 2);
     ctx.fill();
 
     // Plush charcoal foam windscreen capsule + glowing mic-live indicator dot
-    ctx.fillStyle = '#333b4a';
-    ctx.strokeStyle = '#73829c';
+    ctx.fillStyle = hp ? hp.pad : '#333b4a';
+    ctx.strokeStyle = hp ? hp.padEdge : '#73829c';
     ctx.lineWidth = 1.2;
     ctx.beginPath();
     ctx.ellipse(mxTip + 2.5, 22.4, 5.6, 3.8, -0.22, 0, Math.PI * 2);
@@ -3437,6 +3696,7 @@ export class KuroCatEngine {
     const rPress = this.mouseRightPress;
     const mPress = Math.max(this.mouseMiddlePress, this.mouseScrollFlash);
     const colors = this.getMouseButtonColors();
+    const desk = this.isChinchilla ? CHIN_DESK : null;
 
     ctx.save();
     ctx.translate(mx, my);
@@ -3444,10 +3704,12 @@ export class KuroCatEngine {
 
     // Soft 3D base rim / drop shadow
     ctx.save();
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.28)';
-    ctx.shadowBlur = 7;
-    ctx.shadowOffsetY = 3.5;
-    ctx.fillStyle = '#c8cac4';
+    if (!desk) {
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.28)';
+      ctx.shadowBlur = 7;
+      ctx.shadowOffsetY = 3.5;
+    }
+    ctx.fillStyle = desk ? desk.side : '#c8cac4';
     ctx.beginPath();
     ctx.ellipse(0, 1.8, rx, ry, 0, 0, Math.PI * 2);
     ctx.fill();
@@ -3455,8 +3717,8 @@ export class KuroCatEngine {
 
     // Main mouse palm shell (rear/palm at TOP closest to cat; split L/R buttons at BOTTOM pointing away from cat)
     const palmGrad = ctx.createLinearGradient(0, -ry, 0, 2);
-    palmGrad.addColorStop(0.0, '#ecece7');
-    palmGrad.addColorStop(1.0, '#f4f4f0');
+    palmGrad.addColorStop(0.0, desk ? desk.mod : '#ecece7');
+    palmGrad.addColorStop(1.0, desk ? desk.key : '#f4f4f0');
     ctx.fillStyle = palmGrad;
     ctx.beginPath();
     ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
@@ -3489,7 +3751,7 @@ export class KuroCatEngine {
     ctx.lineTo(rx + 2, ry + 2);
     ctx.lineTo(0, ry + 2);
     ctx.closePath();
-    ctx.fillStyle = lPress > 0.08 ? colors.left : '#fafaf7';
+    ctx.fillStyle = lPress > 0.08 ? colors.left : desk ? desk.key : '#fafaf7';
     ctx.fill();
     if (lPress > 0.08) {
       ctx.fillStyle = `rgba(18, 22, 28, ${(0.18 * lPress).toFixed(3)})`;
@@ -3504,7 +3766,7 @@ export class KuroCatEngine {
     ctx.lineTo(0, ry + 2);
     ctx.lineTo(-rx - 2, ry + 2);
     ctx.closePath();
-    ctx.fillStyle = rPress > 0.08 ? colors.right : '#fafaf7';
+    ctx.fillStyle = rPress > 0.08 ? colors.right : desk ? desk.key : '#fafaf7';
     ctx.fill();
     if (rPress > 0.08) {
       ctx.fillStyle = `rgba(18, 22, 28, ${(0.18 * rPress).toFixed(3)})`;
@@ -3513,13 +3775,13 @@ export class KuroCatEngine {
     }
 
     // Crisp horizontal palm-to-button seam & vertical center L/R split line
-    ctx.strokeStyle = 'rgba(42, 45, 52, 0.56)';
+    ctx.strokeStyle = desk ? desk.chassis : 'rgba(42, 45, 52, 0.56)';
     ctx.lineWidth = 1.25;
     ctx.beginPath();
     traceSeam();
     ctx.stroke();
 
-    ctx.strokeStyle = 'rgba(42, 45, 52, 0.66)';
+    ctx.strokeStyle = desk ? desk.chassis : 'rgba(42, 45, 52, 0.66)';
     ctx.lineWidth = 1.3;
     ctx.beginPath();
     ctx.moveTo(0, 0.6);
@@ -3527,11 +3789,11 @@ export class KuroCatEngine {
     ctx.stroke();
 
     // Recessed scroll wheel housing + interactive wheel (middle click & scroll glow)
-    ctx.fillStyle = '#2d2f36';
+    ctx.fillStyle = desk ? desk.accentSide : '#2d2f36';
     this.roundRect(ctx, -2.5, 4.2, 5.0, 9.4, 2.5);
     ctx.fill();
 
-    ctx.fillStyle = mPress > 0.12 ? colors.middle : '#6b6f78';
+    ctx.fillStyle = mPress > 0.12 ? colors.middle : desk ? desk.accent : '#6b6f78';
     this.roundRect(ctx, -1.7, 5.0 + this.mouseMiddlePress * 0.8, 3.4, 7.6, 1.7);
     ctx.fill();
 
@@ -3552,16 +3814,16 @@ export class KuroCatEngine {
     const rxLbl = isCatFacing ? -7.4 : 7.4;
     const lyBase = isCatFacing ? 14.0 : -14.0;
     const pressDir = isCatFacing ? 0.9 : -0.9;
-    ctx.fillStyle = lPress > 0.12 ? '#14161a' : 'rgba(72, 76, 86, 0.56)';
+    ctx.fillStyle = lPress > 0.12 ? (desk ? desk.legend : '#14161a') : desk ? 'rgba(123, 103, 90, 0.5)' : 'rgba(72, 76, 86, 0.56)';
     ctx.fillText('L', lx, lyBase + lPress * pressDir);
-    ctx.fillStyle = rPress > 0.12 ? '#ffffff' : 'rgba(72, 76, 86, 0.56)';
+    ctx.fillStyle = rPress > 0.12 ? (desk ? desk.legend : '#ffffff') : desk ? 'rgba(123, 103, 90, 0.5)' : 'rgba(72, 76, 86, 0.56)';
     ctx.fillText('R', rxLbl, lyBase + rPress * pressDir);
 
     ctx.restore(); // end mouse clip
 
     // Crisp outer silhouette stroke
-    ctx.strokeStyle = '#2b2d34';
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = desk ? desk.chassis : '#2b2d34';
+    ctx.lineWidth = desk ? 2.2 : 1.5;
     ctx.beginPath();
     ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
     ctx.stroke();
@@ -3590,6 +3852,8 @@ export class KuroCatEngine {
     const rowH = innerH / layout.totalRows;
     const unitW = innerW / layout.totalUnits;
     const gap = is108 ? 0.85 : 0.9;
+    // The chinchilla comes with its own milk-tea desk set.
+    const desk = this.isChinchilla ? CHIN_DESK : null;
 
     const drawSingleKey = (
       targetCtx: CanvasRenderingContext2D,
@@ -3617,17 +3881,21 @@ export class KuroCatEngine {
       const y = -innerH / 2 + screenRowTop * rowH + gap * 0.5 + press * 2.0;
       const h = rSpan * rowH - gap - 0.8;
 
-      let topColor = '#f8f8f5';
-      let sideColor = '#d0d2cc';
+      let topColor = desk ? desk.key : '#f8f8f5';
+      let sideColor = desk ? desk.keySide : '#d0d2cc';
       if (press > 0.14) {
-        topColor = this.customSkin
+        topColor = desk
+          ? desk.hit
+          : this.customSkin
           ? this.customSkin.accentColor
           : this.catBreed === 'dafeiyu'
             ? '#5cc8ff'
             : this.catBreed === 'ragdoll'
               ? '#7ac7ff'
               : '#d2f244';
-        sideColor = this.customSkin
+        sideColor = desk
+          ? desk.hitSide
+          : this.customSkin
           ? this.customSkin.accentSideColor
           : this.catBreed === 'dafeiyu'
             ? '#2563eb'
@@ -3638,16 +3906,16 @@ export class KuroCatEngine {
         topColor = pickerAccentTop;
         sideColor = pickerAccentSide;
       } else if (key.accent === 'orange') {
-        topColor = '#f4a524';
-        sideColor = '#c27a10';
+        topColor = desk ? desk.accent : '#f4a524';
+        sideColor = desk ? desk.accentSide : '#c27a10';
       } else if (key.accent === 'mod') {
-        topColor = '#efefeb';
-        sideColor = '#c7c9c3';
+        topColor = desk ? desk.mod : '#efefeb';
+        sideColor = desk ? desk.modSide : '#c7c9c3';
       }
 
       // When overdrawing an animated key onto the cached base, paint the inner keybed strip behind it
       if (press > 0.01) {
-        targetCtx.fillStyle = '#d4d6d1';
+        targetCtx.fillStyle = desk ? desk.plate : '#d4d6d1';
         targetCtx.fillRect(x - 0.4, -innerH / 2 + screenRowTop * rowH + gap * 0.5 - 0.4, w + 0.8, h + 3.8);
       }
 
@@ -3696,10 +3964,12 @@ export class KuroCatEngine {
         }
         targetCtx.font = `700 ${fontSize}px "Segoe UI", system-ui, sans-serif`;
         targetCtx.fillStyle = press > 0.14 || isTailSelected
-          ? '#111214'
+          ? desk ? '#6a4f45' : '#111214'
           : key.accent === 'orange'
             ? '#ffffff'
-            : '#2c2f36';
+            : desk
+              ? desk.legend
+              : '#2c2f36';
         targetCtx.textAlign = 'center';
         targetCtx.textBaseline = 'middle';
         targetCtx.fillText(legend, 0, 0);
@@ -3720,7 +3990,7 @@ export class KuroCatEngine {
       const padMargin = 20;
       const cacheLogW = Math.ceil(botHalfW * 2 + padMargin * 2);
       const cacheLogH = Math.ceil(this.kbHeight + padMargin * 2);
-      const nextKey = `${this.keyboardLayout}|${this.keyboardOrientation}|${this.kbWidth}|${this.kbHeight}|${cacheScale}`;
+      const nextKey = `${this.keyboardLayout}|${this.keyboardOrientation}|${this.kbWidth}|${this.kbHeight}|${cacheScale}|${desk ? 'tea' : ''}`;
 
       if (!this.kbCacheCanvas || this.kbCacheKey !== nextKey) {
         if (!this.kbCacheCanvas) this.kbCacheCanvas = document.createElement('canvas');
@@ -3734,22 +4004,24 @@ export class KuroCatEngine {
           cg.translate(cacheLogW * 0.5, cacheLogH * 0.5);
 
           cg.save();
-          cg.shadowColor = 'rgba(0, 0, 0, 0.34)';
-          cg.shadowBlur = 11;
-          cg.shadowOffsetY = 5;
-          cg.fillStyle = '#191a1e';
+          if (!desk) {
+            cg.shadowColor = 'rgba(0, 0, 0, 0.34)';
+            cg.shadowBlur = 11;
+            cg.shadowOffsetY = 5;
+          }
+          cg.fillStyle = desk ? desk.side : '#191a1e';
           this.trapezoidPath(cg, topHalfW, botHalfW, -halfH + 3.5, halfH + 5.5, 6.5);
           cg.fill();
           cg.restore();
 
-          cg.fillStyle = '#24262c';
-          cg.strokeStyle = '#363840';
+          cg.fillStyle = desk ? desk.chassis : '#24262c';
+          cg.strokeStyle = desk ? desk.chassisEdge : '#363840';
           cg.lineWidth = 1.1;
           this.trapezoidPath(cg, topHalfW, botHalfW, -halfH, halfH, 6.5);
           cg.fill();
           cg.stroke();
 
-          cg.fillStyle = '#d4d6d1';
+          cg.fillStyle = desk ? desk.plate : '#d4d6d1';
           this.trapezoidPath(cg, topHalfW - 5, botHalfW - 5, -halfH + 4, halfH - 4, 3.5);
           cg.fill();
 
@@ -3777,19 +4049,19 @@ export class KuroCatEngine {
       ctx.shadowColor = 'rgba(0, 0, 0, 0.34)';
       ctx.shadowBlur = 11;
       ctx.shadowOffsetY = 5;
-      ctx.fillStyle = '#191a1e';
+      ctx.fillStyle = desk ? desk.side : '#191a1e';
       this.trapezoidPath(ctx, topHalfW, botHalfW, -halfH + 3.5, halfH + 5.5, 6.5);
       ctx.fill();
       ctx.restore();
 
-      ctx.fillStyle = '#24262c';
+      ctx.fillStyle = desk ? desk.chassis : '#24262c';
       ctx.strokeStyle = pickerAccentTop;
       ctx.lineWidth = 2.0;
       this.trapezoidPath(ctx, topHalfW, botHalfW, -halfH, halfH, 6.5);
       ctx.fill();
       ctx.stroke();
 
-      ctx.fillStyle = '#d4d6d1';
+      ctx.fillStyle = desk ? desk.plate : '#d4d6d1';
       this.trapezoidPath(ctx, topHalfW - 5, botHalfW - 5, -halfH + 4, halfH - 4, 3.5);
       ctx.fill();
 
@@ -4241,6 +4513,7 @@ export class KuroCatEngine {
 
   private drawKeyBubbles(ctx: CanvasRenderingContext2D): void {
     const now = performance.now();
+    const desk = this.isChinchilla ? CHIN_DESK : null;
 
     for (const b of this.bubbles) {
       const age = now - b.createdAt;
@@ -4272,20 +4545,20 @@ export class KuroCatEngine {
       ctx.shadowBlur = 5;
       ctx.shadowOffsetY = 2;
 
-      ctx.fillStyle = '#c8cac6';
+      ctx.fillStyle = desk ? desk.keySide : '#c8cac6';
       this.roundRect(ctx, bx, by + 2.2, boxW, boxH, 5.5);
       ctx.fill();
 
       ctx.shadowBlur = 0;
       ctx.fillStyle = '#ffffff';
-      ctx.strokeStyle = 'rgba(38, 40, 46, 0.42)';
+      ctx.strokeStyle = desk ? desk.chassis : 'rgba(38, 40, 46, 0.42)';
       ctx.lineWidth = 1.05;
       this.roundRect(ctx, bx, by, boxW, boxH - 1.3, 5.5);
       ctx.fill();
       ctx.stroke();
 
       if (b.isSpace) {
-        ctx.strokeStyle = '#222429';
+        ctx.strokeStyle = desk ? desk.legend : '#222429';
         ctx.lineWidth = 1.55;
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
@@ -4296,7 +4569,7 @@ export class KuroCatEngine {
         ctx.lineTo(9, -1);
         ctx.stroke();
       } else {
-        ctx.fillStyle = '#1e2025';
+        ctx.fillStyle = desk ? desk.legend : '#1e2025';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(b.label, 0, -0.5);
