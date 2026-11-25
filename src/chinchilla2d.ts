@@ -92,9 +92,8 @@ const ease = (a: number, b: number, x: number) => {
 
 type Map2 = (x: number, y: number) => Pt;
 
-/** Trace a cubic chain, optionally closed. Points go through `map`. */
-function traceCubics(ctx: Ctx, start: readonly [number, number], segs: readonly Cubic[], map: Map2, close = true): void {
-  ctx.beginPath();
+/** Add a closed cubic chain to the current path. Points go through `map`. */
+function addCubics(ctx: Ctx, start: readonly [number, number], segs: readonly Cubic[], map: Map2): void {
   const s = map(start[0], start[1]);
   ctx.moveTo(s.x, s.y);
   for (const [a, b, c] of segs) {
@@ -103,7 +102,22 @@ function traceCubics(ctx: Ctx, start: readonly [number, number], segs: readonly 
     const r = map(c[0], c[1]);
     ctx.bezierCurveTo(p.x, p.y, q.x, q.y, r.x, r.y);
   }
-  if (close) ctx.closePath();
+  ctx.closePath();
+}
+
+function addEllipse(ctx: Ctx, x: number, y: number, rx: number, ry: number, rot: number): void {
+  ctx.moveTo(x + rx * Math.cos(rot), y + rx * Math.sin(rot));
+  ctx.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2);
+  ctx.closePath();
+}
+
+/** Add circles to the current path: painted together they cost little more than one. */
+function addCircles(ctx: Ctx, list: ReadonlyArray<{ x: number; y: number; r: number }>): void {
+  for (const q of list) {
+    ctx.moveTo(q.x + q.r, q.y);
+    ctx.arc(q.x, q.y, q.r, 0, Math.PI * 2);
+    ctx.closePath();
+  }
 }
 
 /** Right half + mirrored left half as one closed chain. */
@@ -147,7 +161,8 @@ const BODY_POINTS: readonly Pt[] = sampleCubics(BODY_START, BODY_CHAIN, 8);
 
 /** Scalloped belly fluff; `at` maps body space (x, h) to the canvas. */
 export function paintBelly(ctx: Ctx, at: Map2): void {
-  traceCubics(ctx, BELLY_START, BELLY_PATH, at);
+  ctx.beginPath();
+  addCubics(ctx, BELLY_START, BELLY_PATH, at);
   ctx.fillStyle = CHIN.cream;
   ctx.fill();
 }
@@ -214,25 +229,22 @@ export function paintFaceMarkings(ctx: Ctx, p: FaceMarkingState): void {
 
   ctx.fillStyle = CHIN.cream;
   ctx.beginPath();
-  ctx.arc(tn - 12, 19.5, 14.6, 0, Math.PI * 2);
-  ctx.arc(tn + 12, 19.5, 14.6, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(tn * 0.95, 26.5, 16, 10.5, 0, 0, Math.PI * 2);
-  ctx.fill();
+  addCircles(ctx, [
+    { x: tn - 12, y: 19.5, r: 14.6 },
+    { x: tn + 12, y: 19.5, r: 14.6 },
+  ]);
+  addEllipse(ctx, tn * 0.95, 26.5, 16, 10.5, 0);
   for (const s of [-1, 1]) {
-    ctx.beginPath();
-    ctx.ellipse(
+    addEllipse(
+      ctx,
       s * (37 - p.cross * 3) + tn * 0.95,
       -27 - p.curious * 3 + p.cross * 5,
       7.6,
       5 - p.cross * 0.8,
       s * lerp(0.14, -0.42, p.cross),
-      0,
-      Math.PI * 2,
     );
-    ctx.fill();
   }
+  ctx.fill();
 
   for (const s of [-1, 1]) {
     ctx.save();
@@ -271,11 +283,9 @@ export function paintEarSkin(ctx: Ctx, side: -1 | 1): void {
   ctx.closePath();
   ctx.fill();
   ctx.fillStyle = CHIN.freckle;
-  for (const [x, y, rx, ry, rot] of EAR_FRECKLES[side < 0 ? 'left' : 'right']) {
-    ctx.beginPath();
-    ctx.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2);
-    ctx.fill();
-  }
+  ctx.beginPath();
+  for (const [x, y, rx, ry, rot] of EAR_FRECKLES[side < 0 ? 'left' : 'right']) addEllipse(ctx, x, y, rx, ry, rot);
+  ctx.fill();
 }
 
 /** Plump heart around the origin, about `2r` wide. */
@@ -298,7 +308,6 @@ const PAW_PATH: readonly Cubic[] = [
   [[11.4, 18.4], [20.2, 12.4], [20.2, 2]],
   [[20.2, -5], [17.4, -9], [17.4, -15]],
 ];
-const PAW_POINTS: readonly Pt[] = [...sampleCubics(PAW_START, PAW_PATH, 9), { x: 17.4, y: -15 }];
 /**
  * Half-width of the sleeve at the shoulder and wrist, how far the wrist sits from the paw's centre, and the
  * length of the straight stub an idle arm is.
@@ -309,8 +318,9 @@ interface ArmShape {
   /** Sleeve edges from shoulder to wrist. */
   left: Pt[];
   right: Pt[];
-  /** Mitten from left wrist to right wrist. */
-  paw: Pt[];
+  /** Mitten from left wrist to right wrist: where it starts, and its curves. */
+  pawFrom: Pt;
+  paw: Array<readonly [Pt, Pt, Pt]>;
   /** Cuff bulge between the wrists. */
   cuff: Pt;
   angle: number;
@@ -321,8 +331,26 @@ interface ArmShape {
   freeR: number;
 }
 
+interface TailShape {
+  puffs: Array<{ x: number; y: number; r: number }>;
+  at: Pt;
+  stalk: Pt[];
+  out: boolean;
+  front: boolean;
+}
+
 export class Chinchilla2D {
+  private shaped: { pose: ChinchillaPose2D; tail: TailShape; arms: ArmShape[] } | null = null;
+
   // ---- geometry ----
+
+  /** Tail and arms of a pose, worked out once for all the layers they appear in. */
+  private shapes(p: ChinchillaPose2D): { tail: TailShape; arms: ArmShape[] } {
+    if (this.shaped?.pose !== p) {
+      this.shaped = { pose: p, tail: this.tail(p), arms: p.paws.map((paw) => this.arm(p, paw)) };
+    }
+    return this.shaped;
+  }
 
   private facePoint(p: ChinchillaPose2D): Pt {
     return p.spine(FACE_H);
@@ -349,8 +377,8 @@ export class Chinchilla2D {
     return g;
   }
 
-  private traceBody(ctx: Ctx, p: ChinchillaPose2D): void {
-    traceCubics(ctx, BODY_START, BODY_CHAIN, (x, h) => this.bodyAt(p, x, h));
+  private addBody(ctx: Ctx, p: ChinchillaPose2D): void {
+    addCubics(ctx, BODY_START, BODY_CHAIN, (x, h) => this.bodyAt(p, x, h));
   }
 
   private withFace(ctx: Ctx, p: ChinchillaPose2D, fn: () => void): void {
@@ -375,15 +403,23 @@ export class Chinchilla2D {
     ctx.restore();
   }
 
-  private traceEar(ctx: Ctx, scale = 1): void {
-    traceCubics(ctx, EAR_START, EAR_PATH, (x, y) => ({ x: x * scale, y: y * scale - (scale < 1 ? 1 : 0) }));
+  private addEar(ctx: Ctx, scale = 1): void {
+    addCubics(ctx, EAR_START, EAR_PATH, (x, y) => ({ x: x * scale, y: y * scale - (scale < 1 ? 1 : 0) }));
+  }
+
+  /** Trace both ears as one path, `scale` < 1 for their inner skin. */
+  private traceEars(ctx: Ctx, p: ChinchillaPose2D, scale = 1): void {
+    ctx.beginPath();
+    this.withFace(ctx, p, () => {
+      for (const s of [-1, 1] as const) this.withEar(ctx, p, s, () => this.addEar(ctx, scale));
+    });
   }
 
   /**
    * Cloud tail. To press a key the whole cloud swings round the outside of the body on a stalk; for keys on
    * the left it first crosses over behind the body.
    */
-  private tail(p: ChinchillaPose2D): { puffs: Array<{ x: number; y: number; r: number }>; at: Pt; stalk: Pt[]; out: boolean; front: boolean } {
+  private tail(p: ChinchillaPose2D): TailShape {
     const { end, stretch, squash, sway, side: s, limit } = p.tail;
     const root = p.spine(34);
     const rest = (px: number, ph: number): Pt => {
@@ -508,7 +544,8 @@ export class Chinchilla2D {
     return {
       left,
       right,
-      paw: PAW_POINTS.map(place),
+      pawFrom: place({ x: PAW_START[0], y: PAW_START[1] }),
+      paw: PAW_PATH.map(([b, c, d]) => [place({ x: b[0], y: b[1] }), place({ x: c[0], y: c[1] }), place({ x: d[0], y: d[1] })] as const),
       cuff: place({ x: 0, y: -28 }),
       angle,
       elbow: (right[h].x - left[h].x) * paw.side,
@@ -517,18 +554,23 @@ export class Chinchilla2D {
     };
   }
 
-  private traceArm(ctx: Ctx, a: ArmShape): void {
-    ctx.beginPath();
+  private addArm(ctx: Ctx, a: ArmShape): void {
     a.left.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
-    for (const q of a.paw) ctx.lineTo(q.x, q.y);
+    ctx.lineTo(a.pawFrom.x, a.pawFrom.y);
+    this.addPaw(ctx, a);
     for (let i = a.right.length - 1; i >= 0; i--) ctx.lineTo(a.right[i].x, a.right[i].y);
     ctx.closePath();
   }
 
+  private addPaw(ctx: Ctx, a: ArmShape): void {
+    for (const [b, c, d] of a.paw) ctx.bezierCurveTo(b.x, b.y, c.x, c.y, d.x, d.y);
+  }
+
   private traceMitten(ctx: Ctx, a: ArmShape): void {
     ctx.beginPath();
-    a.paw.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
-    ctx.quadraticCurveTo(a.cuff.x, a.cuff.y, a.paw[0].x, a.paw[0].y);
+    ctx.moveTo(a.pawFrom.x, a.pawFrom.y);
+    this.addPaw(ctx, a);
+    ctx.quadraticCurveTo(a.cuff.x, a.cuff.y, a.pawFrom.x, a.pawFrom.y);
     ctx.closePath();
   }
 
@@ -543,22 +585,23 @@ export class Chinchilla2D {
       for (let i = from + 1; i <= n; i++) total += Math.hypot(edge[i].x - edge[i - 1].x, edge[i].y - edge[i - 1].y);
       let full = from;
       for (let run = 0; full < n && run < total * 0.46; full++) run += Math.hypot(edge[full + 1].x - edge[full].x, edge[full + 1].y - edge[full].y);
-      return this.brushIn(ctx, edge, from, full);
+      this.addBrush(ctx, edge, from, full);
+      return full;
     };
+    ctx.beginPath();
     const fullL = lead(a.left, a.freeL);
     const fullR = lead(a.right, a.freeR);
-    ctx.beginPath();
-    for (let i = fullL; i <= n; i++) {
-      if (i === fullL) ctx.moveTo(a.left[i].x, a.left[i].y);
-      else ctx.lineTo(a.left[i].x, a.left[i].y);
-    }
-    for (const q of a.paw) ctx.lineTo(q.x, q.y);
+    ctx.fillStyle = CHIN.ink;
+    ctx.fill();
+    this.tracePoints(ctx, a.left, fullL);
+    ctx.lineTo(a.pawFrom.x, a.pawFrom.y);
+    this.addPaw(ctx, a);
     for (let i = n; i >= fullR; i--) ctx.lineTo(a.right[i].x, a.right[i].y);
     this.ink(ctx);
   }
 
-  /** A brush stroke along `edge` that starts from nothing at `from` and has swelled to the full line at `full`. */
-  private brushIn(ctx: Ctx, edge: Pt[], from: number, full: number): number {
+  /** Add a brush stroke along `edge` that starts from nothing at `from` and has swelled to the full line at `full`. */
+  private addBrush(ctx: Ctx, edge: Pt[], from: number, full: number): void {
     const n = edge.length - 1;
     const run: number[] = [0];
     for (let i = from + 1; i <= full; i++) {
@@ -577,13 +620,9 @@ export class Chinchilla2D {
       one.push({ x: edge[i].x - (ty / l) * w, y: edge[i].y + (tx / l) * w });
       other.push({ x: edge[i].x + (ty / l) * w, y: edge[i].y - (tx / l) * w });
     }
-    ctx.fillStyle = CHIN.ink;
-    ctx.beginPath();
     one.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
     for (let i = other.length - 1; i >= 0; i--) ctx.lineTo(other[i].x, other[i].y);
     ctx.closePath();
-    ctx.fill();
-    return full;
   }
 
   private ink(ctx: Ctx, width = INK, color: string = CHIN.ink): void {
@@ -597,76 +636,59 @@ export class Chinchilla2D {
   private strokeWhiskers(ctx: Ctx, p: ChinchillaPose2D): void {
     const tn = p.turn;
     const twitch = Math.sin(p.elapsed * 9) * 0.7 * p.typing;
+    ctx.beginPath();
     for (const s of [-1, 1]) {
       for (const [x0, y0, cx, cy, x1, y1] of WHISKERS) {
-        ctx.beginPath();
         ctx.moveTo(s * x0 + tn * 0.5, y0);
         ctx.quadraticCurveTo(s * cx + tn * 0.3, cy, s * x1 + tn * 0.15, y1 + twitch);
-        ctx.stroke();
       }
     }
+    ctx.stroke();
   }
 
   // ---- layers ----
 
-  /** White die-cut backing + soft drop shadow behind everything. `desk` adds keyboard & mouse paths. */
+  /**
+   * White die-cut backing + soft drop shadow behind everything. `desk` adds keyboard & mouse paths.
+   * All outlines are one path, so the border is stroked and its shadow blurred only once.
+   */
   public drawBacking(ctx: Ctx, p: ChinchillaPose2D, desk: Array<(c: Ctx) => void>): void {
-    const tail = this.tail(p);
-    const paint = (solid: boolean) => {
-      const stroke = () => {
-        if (solid) ctx.fill();
-        ctx.stroke();
-      };
-      for (const trace of desk) {
-        ctx.save();
-        trace(ctx);
-        stroke();
-        ctx.restore();
-      }
-      for (const q of tail.puffs) {
-        ctx.beginPath();
-        ctx.arc(q.x, q.y, q.r, 0, Math.PI * 2);
-        stroke();
-      }
+    const { tail, arms } = this.shapes(p);
+    const extras = () => {
       if (tail.out) {
-        ctx.save();
-        ctx.lineWidth += STALK * 2;
+        ctx.lineWidth = INK + BORDER * 2 + STALK * 2;
         this.tracePoints(ctx, tail.stalk);
         ctx.stroke();
-        ctx.restore();
       }
-      this.withFace(ctx, p, () => {
-        for (const s of [-1, 1] as const) {
-          this.withEar(ctx, p, s, () => {
-            this.traceEar(ctx);
-            stroke();
-          });
-        }
-      });
-      this.traceBody(ctx, p);
-      stroke();
-      for (const paw of p.paws) {
-        this.traceArm(ctx, this.arm(p, paw));
-        stroke();
-      }
-      ctx.save();
       ctx.lineWidth = 8;
       this.withFace(ctx, p, () => this.strokeWhiskers(ctx, p));
-      ctx.restore();
     };
-
     ctx.save();
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
-    ctx.lineWidth = INK + BORDER * 2;
-    ctx.fillStyle = CHIN.sticker;
     ctx.strokeStyle = CHIN.sticker;
     ctx.shadowColor = 'rgba(90, 70, 58, 0.30)';
     ctx.shadowBlur = 8;
     ctx.shadowOffsetY = 3.5;
-    paint(false);
+    extras();
+    ctx.beginPath();
+    for (const add of desk) {
+      ctx.save();
+      add(ctx);
+      ctx.restore();
+    }
+    addCircles(ctx, tail.puffs);
+    this.withFace(ctx, p, () => {
+      for (const s of [-1, 1] as const) this.withEar(ctx, p, s, () => this.addEar(ctx));
+    });
+    this.addBody(ctx, p);
+    for (const arm of arms) this.addArm(ctx, arm);
+    ctx.lineWidth = INK + BORDER * 2;
+    ctx.stroke();
+    // Once more without the shadow, to cover what it left on the border itself.
     ctx.shadowColor = 'transparent';
-    paint(true);
+    ctx.stroke();
+    extras();
     ctx.restore();
   }
 
@@ -735,7 +757,7 @@ export class Chinchilla2D {
    * The stalk changes layer where it is already outside the body, so nothing gets cut off.
    */
   public drawTail(ctx: Ctx, p: ChinchillaPose2D, layer: 'back' | 'front'): void {
-    const { puffs, at, stalk, out, front } = this.tail(p);
+    const { puffs, at, stalk, out, front } = this.shapes(p).tail;
     const s = p.tail.side;
     if (layer === 'front' && !front) return;
     const cloud = layer === 'front' || !front;
@@ -763,11 +785,9 @@ export class Chinchilla2D {
     }
     if (cloud) {
       ctx.lineCap = 'round';
-      for (const q of puffs) {
-        ctx.beginPath();
-        ctx.arc(q.x, q.y, q.r, 0, Math.PI * 2);
-        this.ink(ctx, INK * 2);
-      }
+      ctx.beginPath();
+      addCircles(ctx, puffs);
+      this.ink(ctx, INK * 2);
     }
     if (out) {
       ctx.lineCap = 'butt';
@@ -796,18 +816,19 @@ export class Chinchilla2D {
           const q = inside.edge[i];
           if (q.y > p.deskTop || s * q.x < this.flank(p, q.y) || puffs.some((o) => Math.hypot(q.x - o.x, q.y - o.y) < o.r + INK)) meet = i;
         }
-        const on = this.brushIn(ctx, inside.edge, from, meet);
-        this.tracePoints(ctx, inside.edge, on);
+        ctx.beginPath();
+        this.addBrush(ctx, inside.edge, from, meet);
+        ctx.fillStyle = CHIN.ink;
+        ctx.fill();
+        this.tracePoints(ctx, inside.edge, meet);
         this.ink(ctx);
       }
     }
     if (cloud) {
       ctx.fillStyle = g;
-      for (const q of puffs) {
-        ctx.beginPath();
-        ctx.arc(q.x, q.y, q.r, 0, Math.PI * 2);
-        ctx.fill();
-      }
+      ctx.beginPath();
+      addCircles(ctx, puffs);
+      ctx.fill();
       const curl = 1 - clamp01(p.tail.stretch * 3);
       if (curl > 0.02) {
         const c = puffs[8];
@@ -825,25 +846,24 @@ export class Chinchilla2D {
   /** Ears, body, belly and face. */
   public drawBody(ctx: Ctx, p: ChinchillaPose2D, accessories?: { back: () => void; front: () => void }): void {
     const fur = this.furGradient(ctx, p);
+    ctx.save();
+    this.traceEars(ctx, p);
+    ctx.fillStyle = CHIN.earRim;
+    ctx.fill();
+    ctx.save();
+    this.traceEars(ctx, p, EAR_INNER);
+    ctx.clip();
     this.withFace(ctx, p, () => {
-      for (const s of [-1, 1] as const) {
-        this.withEar(ctx, p, s, () => {
-          this.traceEar(ctx);
-          ctx.fillStyle = CHIN.earRim;
-          ctx.fill();
-          ctx.save();
-          this.traceEar(ctx, EAR_INNER);
-          ctx.clip();
-          paintEarSkin(ctx, s);
-          ctx.restore();
-          this.traceEar(ctx);
-          this.ink(ctx);
-        });
-      }
+      for (const s of [-1, 1] as const) this.withEar(ctx, p, s, () => paintEarSkin(ctx, s));
     });
+    ctx.restore();
+    this.traceEars(ctx, p);
+    this.ink(ctx);
+    ctx.restore();
 
     ctx.save();
-    this.traceBody(ctx, p);
+    ctx.beginPath();
+    this.addBody(ctx, p);
     ctx.fillStyle = fur;
     ctx.fill();
     ctx.save();
@@ -852,7 +872,8 @@ export class Chinchilla2D {
     paintBelly(ctx, (x, h) => this.bodyAt(p, x, h));
     this.withFace(ctx, p, () => paintFaceMarkings(ctx, p));
     ctx.restore();
-    this.traceBody(ctx, p);
+    ctx.beginPath();
+    this.addBody(ctx, p);
     this.ink(ctx);
     ctx.restore();
 
@@ -933,14 +954,13 @@ export class Chinchilla2D {
       ctx.fill();
       ctx.globalAlpha = 1;
       ctx.fillStyle = '#ffffff';
-      const dot = (x: number, y: number, r: number) => {
-        ctx.beginPath();
-        ctx.arc(x + gx, y + gy, r, 0, Math.PI * 2);
-        ctx.fill();
-      };
-      dot(-rx * 0.32, -full * 0.38, rx * (0.38 + p.curious * 0.05));
-      dot(rx * 0.4, full * 0.34, rx * (0.18 + p.curious * 0.06));
-      dot(rx * 0.44, -full * 0.32, rx * 0.09);
+      ctx.beginPath();
+      addCircles(ctx, [
+        { x: gx - rx * 0.32, y: gy - full * 0.38, r: rx * (0.38 + p.curious * 0.05) },
+        { x: gx + rx * 0.4, y: gy + full * 0.34, r: rx * (0.18 + p.curious * 0.06) },
+        { x: gx + rx * 0.44, y: gy - full * 0.32, r: rx * 0.09 },
+      ]);
+      ctx.fill();
     }
     ctx.restore();
 
@@ -1032,8 +1052,9 @@ export class Chinchilla2D {
       ctx.restore();
     }
 
-    for (const paw of p.paws) {
-      const arm = this.arm(p, paw);
+    const { arms } = this.shapes(p);
+    for (const [i, paw] of p.paws.entries()) {
+      const arm = arms[i];
       ctx.save();
       if (paw.shadow > 0.02) {
         ctx.fillStyle = `rgba(110, 88, 74, ${(0.26 * paw.shadow).toFixed(3)})`;
@@ -1051,7 +1072,8 @@ export class Chinchilla2D {
         ctx.arc(paw.x, paw.y + 6, r, 0, Math.PI * 2);
         ctx.fill();
       }
-      this.traceArm(ctx, arm);
+      ctx.beginPath();
+      this.addArm(ctx, arm);
       // Same fur and chin shade as the body, so the sleeve grows out of it without a seam.
       ctx.fillStyle = fur;
       ctx.fill();

@@ -2370,16 +2370,16 @@ export class KuroCatEngine {
     ctx.restore();
   }
 
-  /** Keyboard chassis outline in canvas space (also used to seat the chinchilla behind it). */
-  private traceKeyboardChassis(ctx: CanvasRenderingContext2D, grow = 0): void {
+  /** Add the keyboard chassis outline to the current path. */
+  private addKeyboardChassis(ctx: CanvasRenderingContext2D): void {
     ctx.translate(this.kbCenterX, this.kbCenterY + this.kbBounce * 1.1 + this.deskHopY);
     ctx.rotate(this.kbTiltRad);
-    this.trapezoidPath(
+    this.addTrapezoid(
       ctx,
-      (this.kbWidth * 0.955) / 2 + grow,
-      (this.kbWidth * 1.035) / 2 + grow,
-      -this.kbHeight / 2 - grow,
-      this.kbHeight / 2 + 5.5 + grow,
+      (this.kbWidth * 0.955) / 2,
+      (this.kbWidth * 1.035) / 2,
+      -this.kbHeight / 2,
+      this.kbHeight / 2 + 5.5,
       6.5,
     );
   }
@@ -2480,10 +2480,13 @@ export class KuroCatEngine {
     const mouseX = this.mouseBaseX + this.mouseOffsetX;
     const mouseY = this.mouseBaseY + this.mouseOffsetY + this.deskHopY * 1.35;
     this.chinchilla.drawBacking(ctx, pose, [
-      (c) => this.traceKeyboardChassis(c),
+      (c) => this.addKeyboardChassis(c),
       (c) => {
-        c.beginPath();
-        c.ellipse(mouseX, mouseY + 1, 18.5, 24, -0.06, 0, Math.PI * 2);
+        c.translate(mouseX, mouseY + 1);
+        c.rotate(-0.06);
+        c.moveTo(18.5, 0);
+        c.ellipse(0, 0, 18.5, 24, 0, 0, Math.PI * 2);
+        c.closePath();
       },
     ]);
 
@@ -5596,6 +5599,17 @@ export class KuroCatEngine {
     r: number,
   ): void {
     ctx.beginPath();
+    this.addTrapezoid(ctx, topHalfW, botHalfW, topY, botY, r);
+  }
+
+  private addTrapezoid(
+    ctx: CanvasRenderingContext2D,
+    topHalfW: number,
+    botHalfW: number,
+    topY: number,
+    botY: number,
+    r: number,
+  ): void {
     ctx.moveTo(-topHalfW + r, topY);
     ctx.lineTo(topHalfW - r, topY);
     ctx.quadraticCurveTo(topHalfW, topY, topHalfW + 1, topY + r);
