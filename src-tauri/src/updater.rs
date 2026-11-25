@@ -9,6 +9,10 @@ const REPO_RELEASES_PAGE: &str = "https://github.com/qianyiai/kurocat/releases/l
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// This fork carries its owner's own pet. An official release would replace the whole app with the stock
+/// one, so new releases are only announced, with a link to their page; they come in by merging the code.
+pub const ANNOUNCE_ONLY: bool = true;
+
 static LATEST_UPDATE_CACHE: OnceLock<Mutex<Option<UpdateInfo>>> = OnceLock::new();
 
 pub fn get_cached_update_info() -> Option<UpdateInfo> {
@@ -685,7 +689,11 @@ pub fn check_latest_update() -> Result<UpdateInfo, String> {
         .to_string();
     let has_update = is_newer_version(&latest_clean, CURRENT_VERSION);
     let install_kind = detect_install_kind();
-    let asset = select_asset(&rel.assets, install_kind);
+    let asset = if ANNOUNCE_ONLY {
+        None
+    } else {
+        select_asset(&rel.assets, install_kind)
+    };
 
     let info = UpdateInfo {
         current_version: CURRENT_VERSION.to_string(),
@@ -1063,6 +1071,10 @@ fn install_macos_update(app: &AppHandle, info: &UpdateInfo) -> Result<(), String
 }
 
 pub fn perform_update_install(app: &AppHandle, info: UpdateInfo) -> Result<(), String> {
+    if ANNOUNCE_ONLY {
+        open_url_in_browser(&info.release_url);
+        return Err("这是你自己的龙猫版，不会被官方版覆盖：新版本要先合并进代码再打包".to_string());
+    }
     if !info.has_update {
         emit_progress(
             app,
