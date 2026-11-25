@@ -45,6 +45,8 @@ interface AppSettings {
   renderMode?: DesktopRenderMode;
   collarColor?: CollarColorId;
   headphoneMode?: HeadphoneMode;
+  /** 30 = power saving; anything else follows the display (up to 60). */
+  fpsCap?: number;
 }
 
 type InputEvent =
@@ -106,7 +108,7 @@ function saveDismissedVersion(version: string): void {
   }
 }
 
-let appVersion = '5.1.0';
+let appVersion = '5.1.2';
 let latestUpdateInfo: UpdateInfo | null = null;
 let updateBusy = false;
 let dismissedVersion: string | null = loadDismissedVersion();
@@ -150,12 +152,18 @@ let settings: AppSettings = {
   renderMode: '3d',
   collarColor: 'none',
   headphoneMode: 'off',
+  fpsCap: 0,
 };
 
 let catList: CatSkinConfig[] = [...DEFAULT_BUILTIN_CATS];
 
 const canvas = document.getElementById('pet-canvas') as HTMLCanvasElement;
-const canvas3d = document.getElementById('pet-canvas-3d') as HTMLCanvasElement;
+// Replaced by a fresh canvas when its WebGL context is gone for good (see replaceCanvas3d).
+let canvas3d = document.getElementById('pet-canvas-3d') as HTMLCanvasElement;
+let canvas3dMouseDownListener: ((e: MouseEvent) => void) | null = null;
+let canvas3dContextMenuListener: ((e: MouseEvent) => void) | null = null;
+let canvas3dDirty = false;
+let settingsPatchSeq = 0;
 const menuEl = document.getElementById('context-menu') as HTMLDivElement;
 const breedPillsEl = document.getElementById('breed-pills') as HTMLDivElement;
 const scaleSliderEl = document.getElementById('scale-slider') as HTMLInputElement;
@@ -178,11 +186,87 @@ const engine = new KuroCatEngine(canvas);
 // Lazy-loaded Three.js 3D engine (NEVER imported when user stays in 2D mode -> +0 MB overhead!)
 let engine3d: KuroCatEngine3D | null = null;
 let loading3dPromise: Promise<void> | null = null;
+let dispose3dTimer: number | null = null;
+/** After this long in 2D the 3D engine is dropped, to give its memory back. */
+const IDLE_3D_DISPOSE_MS = 8000;
 let webgl3dUnavailable = false;
 let isWin7Ulw = false;
 let active3d = false;
 let privacyActive = false;
 let gameActive = false;
+
+window.addEventListener('resize', () => engine3d?.resize());
+
+function isWindowsPlatform(): boolean {
+  return /Win/i.test(navigator.platform || navigator.userAgent);
+}
+
+function bindCanvas3dListeners(el: HTMLCanvasElement): void {
+  if (canvas3dMouseDownListener) el.addEventListener('mousedown', canvas3dMouseDownListener);
+  if (canvas3dContextMenuListener) el.addEventListener('contextmenu', canvas3dContextMenuListener);
+  // The system can take the GPU away (sleep, driver reset): show 2D meanwhile and rebuild 3D on a new canvas.
+  el.addEventListener('webglcontextlost', (ev) => {
+    ev.preventDefault();
+    if (el !== canvas3d) return;
+    canvas3dDirty = true;
+    if (!engine3d) return;
+    const dead = engine3d;
+    engine3d = null;
+    dead.stop();
+    if (active3d) {
+      active3d = false;
+      canvas3d.classList.add('hidden');
+      canvas.classList.remove('hidden');
+      engine.resize();
+      engine.start();
+    }
+    window.setTimeout(() => {
+      if (wants3DNow() && !engine3d && !loading3dPromise) activateRenderEngine();
+    }, 300);
+  });
+}
+
+/** A canvas whose context was lost for good cannot get a new one, so it is swapped for a fresh one. */
+function replaceCanvas3d(): HTMLCanvasElement {
+  const old = canvas3d;
+  if (canvas3dMouseDownListener) old.removeEventListener('mousedown', canvas3dMouseDownListener);
+  if (canvas3dContextMenuListener) old.removeEventListener('contextmenu', canvas3dContextMenuListener);
+  const fresh = document.createElement('canvas');
+  fresh.id = 'pet-canvas-3d';
+  fresh.className = old.className;
+  fresh.classList.remove('pet-hover', 'pet-dragging');
+  old.replaceWith(fresh);
+  canvas3d = fresh;
+  canvas3dDirty = false;
+  bindCanvas3dListeners(fresh);
+  return fresh;
+}
+
+function disposeEngine3D(): void {
+  if (!engine3d) return;
+  const old = engine3d;
+  engine3d = null;
+  active3d = false;
+  old.dispose();
+  replaceCanvas3d();
+  canvas3d.classList.add('hidden');
+}
+
+function cancelPending3dDispose(): void {
+  if (dispose3dTimer !== null) {
+    window.clearTimeout(dispose3dTimer);
+    dispose3dTimer = null;
+  }
+}
+
+function schedule3dDisposeIf2D(): void {
+  cancelPending3dDispose();
+  if (!engine3d || active3d || tailPickerOpen || wants3DNow()) return;
+  dispose3dTimer = window.setTimeout(() => {
+    dispose3dTimer = null;
+    if (engine3d && !active3d && !tailPickerOpen && !wants3DNow()) disposeEngine3D();
+  }, IDLE_3D_DISPOSE_MS);
+}
 
 function shouldWearHeadphonesNow(): boolean {
   if (settings.catBreed === 'dafeiyu') return false;
@@ -236,6 +320,7 @@ function syncEngine3DState(): void {
   engine3d.setKeyboardConfig(kbLayout, kbOrient);
   engine3d.setTailKeyConfig(tailMode, tailIds);
   engine3d.setPrivacyMode(privacyActive);
+  engine3d.setFpsCap(settings.fpsCap === 30 ? 30 : 0);
   engine3d.resize();
 }
 
@@ -250,13 +335,18 @@ function activateRenderEngine(): void {
       active3d = false;
     }
     engine.start();
+    schedule3dDisposeIf2D();
     return;
   }
+
+  cancelPending3dDispose();
+  if (engine3d && engine3d.isContextLost()) disposeEngine3D();
 
   if (engine3d) {
     syncEngine3DState();
     if (!active3d) {
       engine.stop();
+      engine.releaseCachedResources();
       canvas.classList.add('hidden');
       canvas3d.classList.remove('hidden');
       engine3d.resize();
@@ -267,18 +357,27 @@ function activateRenderEngine(): void {
   }
 
   if (!loading3dPromise) {
+    if (canvas3dDirty) replaceCanvas3d();
     loading3dPromise = import('./catEngine3d')
       .then(({ KuroCatEngine3D }) => {
-        engine3d = new KuroCatEngine3D(canvas3d, { embedded: false });
-        window.addEventListener('resize', () => engine3d?.resize());
+        if (canvas3dDirty) replaceCanvas3d();
+        const created = new KuroCatEngine3D(canvas3d, { embedded: false });
+        if (created.isContextLost()) {
+          created.dispose();
+          replaceCanvas3d();
+          throw new Error('WebGL context lost immediately after creation');
+        }
+        engine3d = created;
         activateRenderEngine();
       })
       .catch((err) => {
         console.warn('3D WebGL unavailable, keeping 2D mode:', err);
         webgl3dUnavailable = true;
         active3d = false;
+        replaceCanvas3d();
         canvas3d.classList.add('hidden');
         canvas.classList.remove('hidden');
+        engine.resize();
         engine.start();
       })
       .finally(() => {
@@ -356,6 +455,10 @@ function syncMenuUI(): void {
   document.querySelectorAll<HTMLButtonElement>('[data-tailmode]').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.tailmode === tailMode);
   });
+  const fpsCap = settings.fpsCap === 30 ? 30 : 0;
+  document.querySelectorAll<HTMLButtonElement>('[data-fpscap]').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.fpscap === String(fpsCap));
+  });
   if (tailModeBadgeEl) {
     tailModeBadgeEl.textContent = TAIL_MODE_LABELS[tailMode];
   }
@@ -408,6 +511,8 @@ function syncMenuUI(): void {
   engine.setHeadphones(shouldWearHeadphonesNow());
   engine.setKeyboardConfig(kbLayout, kbOrient);
   engine.setTailKeyConfig(tailMode, tailIds);
+  engine.setFpsCap(fpsCap);
+  engine3d?.setFpsCap(fpsCap);
   if (!sliderDragging) {
     engine.setRenderScale(settings.scale);
   }
@@ -587,9 +692,14 @@ async function confirmTailPicker(): Promise<void> {
 }
 
 async function applySettingsPatch(patch: Partial<AppSettings>): Promise<void> {
+  if (patch.renderMode === '3d') webgl3dUnavailable = false;
+  // Quick clicks: only the newest answer counts, so an older one cannot undo a later choice.
+  const seq = ++settingsPatchSeq;
   settings = { ...settings, ...patch };
   syncMenuUI();
-  settings = await invoke<AppSettings>('update_settings', { patch: settings });
+  const updated = await invoke<AppSettings>('update_settings', { patch: settings });
+  if (seq !== settingsPatchSeq) return;
+  settings = updated;
   syncMenuUI();
 }
 
@@ -929,7 +1039,10 @@ async function bootstrap(): Promise<void> {
 
   await listen<AppSettings>('kuro-settings', (ev) => {
     const prevLock = lastKnownLockState;
+    const prevRenderMode = settings.renderMode;
     settings = ev.payload;
+    // Asking for 3D again gives WebGL another try.
+    if (prevRenderMode === '2d' && settings.renderMode !== '2d') webgl3dUnavailable = false;
     lastKnownLockState = settings.clickThroughLocked;
     syncMenuUI();
     if (prevLock !== null && prevLock !== settings.clickThroughLocked) {
@@ -1109,8 +1222,12 @@ async function bootstrap(): Promise<void> {
       canvas3d.classList.add('pet-dragging');
       void invoke('set_dragging', { dragging: true });
       try {
-        const nativeHandled = await invoke<boolean>('start_pet_drag').catch(() => false);
-        if (!nativeHandled) {
+        // macOS starts a window drag from the mouse-down event it is handling right now; waiting for an IPC
+        // reply first lets that event pass and the drag silently does nothing. Only Windows has its own drag loop.
+        if (isWindowsPlatform()) {
+          const nativeHandled = await invoke<boolean>('start_pet_drag').catch(() => false);
+          if (!nativeHandled) await getCurrentWindow().startDragging();
+        } else {
           await getCurrentWindow().startDragging();
         }
       } finally {
@@ -1123,8 +1240,8 @@ async function bootstrap(): Promise<void> {
       }
     }
   };
+  canvas3dMouseDownListener = handleCanvasMouseDown;
   canvas.addEventListener('mousedown', handleCanvasMouseDown);
-  canvas3d.addEventListener('mousedown', handleCanvasMouseDown);
 
   // Right-click opens sleek dark glass settings menu (both 2D & 3D canvases!)
   const handleCanvasContextMenu = (e: MouseEvent) => {
@@ -1136,8 +1253,9 @@ async function bootstrap(): Promise<void> {
     if (settings.clickThroughLocked && !altOverride && !e.altKey) return;
     openContextMenu(e.clientX, e.clientY);
   };
+  canvas3dContextMenuListener = handleCanvasContextMenu;
   canvas.addEventListener('contextmenu', handleCanvasContextMenu);
-  canvas3d.addEventListener('contextmenu', handleCanvasContextMenu);
+  bindCanvas3dListeners(canvas3d);
 
   // Side menu window auto-closes on its own focus loss; do NOT close on main blur (clicking the menu blurs main!)
   window.addEventListener('keydown', (e) => {
@@ -1151,9 +1269,15 @@ async function bootstrap(): Promise<void> {
 
   menuEl.addEventListener('click', (e) => {
     const target = (e.target as HTMLElement).closest<HTMLElement>(
-      '[data-action], [data-scale], [data-breed], [data-rendermode], [data-collar], [data-headphonemode], [data-kblayout], [data-kborient], [data-tailmode]',
+      '[data-action], [data-scale], [data-breed], [data-rendermode], [data-collar], [data-headphonemode], [data-kblayout], [data-kborient], [data-tailmode], [data-fpscap]',
     );
     if (!target) return;
+
+    const fpsAttr = target.dataset.fpscap;
+    if (fpsAttr === '0' || fpsAttr === '30') {
+      void applySettingsPatch({ fpsCap: fpsAttr === '30' ? 30 : 0 });
+      return;
+    }
 
     const headphoneAttr = target.dataset.headphonemode;
     if (headphoneAttr === 'auto' || headphoneAttr === 'on' || headphoneAttr === 'off') {

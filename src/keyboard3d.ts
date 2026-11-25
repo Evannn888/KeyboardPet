@@ -385,6 +385,14 @@ function getKeycapAtlas(
   const cached = keyAtlasCache.get(cacheKey);
   if (cached) return cached;
 
+  // Only the atlas in use is kept, so switching layouts or desk sets does not pile up textures.
+  for (const [oldKey, oldEntry] of keyAtlasCache) {
+    if (oldKey !== cacheKey) {
+      oldEntry.tex.dispose();
+      keyAtlasCache.delete(oldKey);
+    }
+  }
+
   const unique: Array<{ key: string; label: string; accent: 'base' | 'mod' | 'orange' }> = [];
   const seen = new Set<string>();
   for (const spec of keys) {
@@ -480,6 +488,13 @@ function getKeycapAtlas(
   const entry: KeyAtlasData = { tex, rects };
   keyAtlasCache.set(cacheKey, entry);
   return entry;
+}
+
+export function disposeKeyboardCaches(): void {
+  for (const entry of keyAtlasCache.values()) entry.tex.dispose();
+  keyAtlasCache.clear();
+  for (const tex of miscTextureCache.values()) tex.dispose();
+  miscTextureCache.clear();
 }
 
 function makeSoftShadowTexture(): THREE.CanvasTexture {
@@ -1258,5 +1273,27 @@ export class KeyboardAndMouse3D {
 
     const anyPress = Math.max(this.leftPress, this.rightPress);
     this.mouseShape.scale.set(1 + 0.03 * anyPress, 1 - 0.10 * anyPress, 1);
+  }
+
+  /** Free the desk set's GPU resources. */
+  public dispose(): void {
+    this.deskGroup.traverse((obj: THREE.Object3D) => {
+      const mesh = obj as THREE.Mesh;
+      if (mesh.geometry) mesh.geometry.dispose();
+      const mat = mesh.material;
+      if (Array.isArray(mat)) {
+        for (const m of mat) m.dispose();
+      } else if (mat) {
+        mat.dispose();
+      }
+    });
+    for (const d of this.boardDisposables) d.dispose();
+    this.boardDisposables.length = 0;
+    this.capSideGeo.dispose();
+    this.capTopBaseGeo.dispose();
+    this.capSideMat.dispose();
+    this.chassisMat.dispose();
+    this.kbShadowMat.dispose();
+    disposeKeyboardCaches();
   }
 }

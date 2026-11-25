@@ -199,11 +199,28 @@ function withTowardEye(mat: THREE.Material, lift: number): THREE.Material {
 }
 
 const spriteTexCache = new Map<string, { tex: THREE.CanvasTexture; aspect: number }>();
+/** Key bubbles get their own texture per label; keep only this many of them. */
+const MAX_POPUP_TEX_CACHE = 48;
+
+function disposeSpriteTexCache(): void {
+  for (const entry of spriteTexCache.values()) entry.tex.dispose();
+  spriteTexCache.clear();
+}
 
 function getPopupTexture(text: string, tea: boolean): { tex: THREE.CanvasTexture; aspect: number } {
   const key = `pop:${tea ? 'tea:' : ''}${text}`;
   const hit = spriteTexCache.get(key);
   if (hit) return hit;
+
+  if (spriteTexCache.size >= MAX_POPUP_TEX_CACHE) {
+    for (const [oldKey, oldEntry] of spriteTexCache) {
+      if (oldKey.startsWith('pop:')) {
+        oldEntry.tex.dispose();
+        spriteTexCache.delete(oldKey);
+        break;
+      }
+    }
+  }
 
   const h = 110;
   const font = '700 48px "Segoe UI", system-ui, sans-serif';
@@ -621,6 +638,8 @@ export class KuroCatEngine3D {
   private classicWhiskers: THREE.Mesh | null = null;
   private chin: ChinchillaRig | null = null;
   private isChinchilla = false;
+  private fpsCap = 0;
+  private disposed = false;
   private hugAmt = 0;
   private lastSpacePaw: 'L' | 'R' = 'L';
 
@@ -1951,7 +1970,7 @@ export class KuroCatEngine3D {
   }
 
   public start(): void {
-    if (this.rafId !== null || this.idleTimer !== null) return;
+    if (this.disposed || this.rafId !== null || this.idleTimer !== null) return;
     this.lastFrameMs = performance.now();
     this.directRafPrevMs = 0;
     this.isIdlePacing = false;
@@ -1970,11 +1989,69 @@ export class KuroCatEngine3D {
     this.isIdlePacing = false;
   }
 
+  /** 30 = power saving: at most 30 frames a second, like while a game runs. */
+  public setFpsCap(cap: number): void {
+    this.fpsCap = cap === 30 ? 30 : 0;
+  }
+
+  /** True once the GPU has taken the WebGL context away (or after `dispose()`). */
+  public isContextLost(): boolean {
+    if (this.disposed) return true;
+    try {
+      return this.renderer.getContext().isContextLost();
+    } catch {
+      return true;
+    }
+  }
+
+  /** Free everything on the GPU; the engine cannot be used afterwards. */
+  public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.stop();
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
+    this.scene.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (mesh.geometry) geometries.add(mesh.geometry);
+      const mat = mesh.material;
+      for (const m of Array.isArray(mat) ? mat : mat ? [mat] : []) materials.add(m);
+    });
+    // The looks of the eyes that are not showing right now are not in the scene.
+    for (const e of this.eyes) {
+      for (const look of [e.cat, ...(this.chin ? [this.chin.eyes[this.eyes.indexOf(e)]] : [])]) {
+        geometries.add(look.eye).add(look.arc).add(look.squint).add(look.blush);
+        materials.add(look.mat);
+      }
+    }
+    if (this.chin) {
+      geometries.add(this.chin.body);
+      materials.add(this.chin.bodyMat);
+      this.chin.sticker.dispose();
+    }
+    geometries.add(this.bodyGeo);
+    materials.add(this.catBodyMat);
+    for (const g of geometries) g.dispose();
+    for (const m of materials) {
+      (m as THREE.Material & { map?: THREE.Texture | null }).map?.dispose();
+      m.dispose();
+    }
+    this.desk.dispose();
+    disposeSpriteTexCache();
+    this.renderer.dispose();
+    try {
+      this.renderer.forceContextLoss();
+    } catch {
+      // Already lost.
+    }
+  }
+
   public setGameActive(active: boolean): void {
     this.gameActive = Boolean(active);
   }
 
   private readonly renderFrame = (nowMs: number): void => {
+    if (this.disposed) return;
     const frameId = this.rafId;
     const workStart = performance.now();
 
@@ -2014,11 +2091,12 @@ export class KuroCatEngine3D {
 
     // Smart adaptive frame pacing:
     // - Calibrate VSync over first 8 active frames
+    // - User Eco 30 FPS or Game Eco Mode (foreground PC game detected): cap at 30 FPS
     // - On 60Hz monitors in normal mode: native direct rAF (0 timer jitter)
     // - On 120-240Hz monitors in normal mode: cap cleanly at 60 FPS (cuts 240Hz GPU/CPU by 4x!)
-    // - In Game Eco Mode (foreground PC game detected): cap at 30 FPS (cuts 240Hz GPU/CPU by 8x!)
     // - Idle awake: ~18 FPS (55ms); Deep sleep: ~12 FPS (85ms)
-    if (busy && (this.vsyncSamples < 8 || (!this.gameActive && this.vsyncMs >= 13.5))) {
+    const eco30 = this.gameActive || this.fpsCap === 30;
+    if (busy && (this.vsyncSamples < 8 || (!eco30 && this.vsyncMs >= 13.5))) {
       this.isIdlePacing = false;
       this.directRafPrevMs = nowMs;
       this.rafId = requestAnimationFrame(this.renderFrame);
@@ -2028,7 +2106,7 @@ export class KuroCatEngine3D {
     this.directRafPrevMs = 0;
     const workMs = performance.now() - workStart;
     const targetMs = busy
-      ? this.gameActive
+      ? eco30
         ? 33.33
         : 16.67
       : this.sleepAmt > 0.95

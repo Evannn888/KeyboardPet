@@ -68,6 +68,19 @@ pub fn normalize_headphone_mode(raw: &str) -> String {
     }
 }
 
+pub fn default_fps_cap() -> u16 {
+    0
+}
+
+/// 30 = power saving, anything else = the display's own pace (up to 60).
+pub fn normalize_fps_cap(raw: u16) -> u16 {
+    if raw == 30 {
+        30
+    } else {
+        0
+    }
+}
+
 pub fn default_keyboard_layout() -> String {
     if cfg!(feature = "layout-108") {
         "108".to_string()
@@ -183,6 +196,8 @@ pub struct AppSettings {
     pub collar_color: String,
     #[serde(default = "default_headphone_mode")]
     pub headphone_mode: String,
+    #[serde(default = "default_fps_cap")]
+    pub fps_cap: u16,
 }
 
 impl Default for AppSettings {
@@ -214,6 +229,7 @@ impl Default for AppSettings {
             render_mode: default_render_mode(),
             collar_color: default_collar_color(),
             headphone_mode: default_headphone_mode(),
+            fps_cap: default_fps_cap(),
         }
     }
 }
@@ -258,6 +274,7 @@ pub fn load_settings() -> AppSettings {
             parsed.render_mode = normalize_render_mode(&parsed.render_mode);
             parsed.collar_color = normalize_collar_color(&parsed.collar_color);
             parsed.headphone_mode = normalize_headphone_mode(&parsed.headphone_mode);
+            parsed.fps_cap = normalize_fps_cap(parsed.fps_cap);
             return parsed;
         }
     }
@@ -508,6 +525,14 @@ mod tests {
             normalize_tail_key_ids(&raw),
             vec!["enter".to_string(), "np_0".to_string(), "badkey".to_string()]
         );
+    }
+
+    #[test]
+    fn fps_cap_is_30_or_unlimited() {
+        assert_eq!(normalize_fps_cap(30), 30);
+        assert_eq!(normalize_fps_cap(0), 0);
+        assert_eq!(normalize_fps_cap(60), 0);
+        assert_eq!(normalize_fps_cap(7), 0);
     }
 
     #[test]

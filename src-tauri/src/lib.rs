@@ -246,6 +246,8 @@ pub fn shutdown_pet_windows() {
     if win_needs_win7_ulw() {
         win7_layered::shutdown();
     }
+    #[cfg(unix)]
+    release_single_instance_lock();
 }
 
 pub fn run_mcp_stdio() {
@@ -340,6 +342,7 @@ fn update_settings(app: AppHandle, state: State<'_, AppState>, mut patch: AppSet
     patch.render_mode = config::normalize_render_mode(&patch.render_mode);
     patch.collar_color = config::normalize_collar_color(&patch.collar_color);
     patch.headphone_mode = config::normalize_headphone_mode(&patch.headphone_mode);
+    patch.fps_cap = config::normalize_fps_cap(patch.fps_cap);
 
     let (prev_autostart, prev_scale, prev_layout, prev_obs_hide) = {
         let s = state.settings.lock().unwrap();
@@ -2245,8 +2248,77 @@ fn linux_configure_display_env() {
     }
 }
 
+#[cfg(unix)]
+fn single_instance_slot() -> &'static Mutex<Option<std::fs::File>> {
+    use std::sync::OnceLock;
+    static SLOT: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Only one pet at a time. The lock file stays locked for as long as the app runs, and the system lets go of
+/// it when the process ends, however it ends. (`--mcp` leaves in main.rs before `run()`, so it never waits here.)
+///
+/// A restart may start the new copy while the old one is still closing, so wait a moment before giving up.
+#[cfg(unix)]
+fn acquire_single_instance_lock(path: &std::path::Path, attempts: u32) -> bool {
+    use std::os::unix::io::AsRawFd;
+
+    extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    for attempt in 0..attempts.max(1) {
+        // Never keep the pet from starting because of the lock file itself.
+        let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+        else {
+            return true;
+        };
+        if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
+            if let Ok(mut slot) = single_instance_slot().lock() {
+                *slot = Some(file);
+            }
+            return true;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+fn release_single_instance_lock() {
+    if let Ok(mut slot) = single_instance_slot().lock() {
+        *slot = None;
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Emergency CLI escape hatch: launching with `--unlock` clears the click-through lock, even when a copy is
+    // already running and this one quits below (its storage watcher picks the change up within 400 ms).
+    if std::env::args().any(|a| a == "--unlock") {
+        let mut s = load_settings();
+        if s.click_through_locked {
+            s.click_through_locked = false;
+            save_settings(&s);
+        }
+    }
+
+    #[cfg(unix)]
+    if !acquire_single_instance_lock(&config::app_data_dir().join("kurocat.lock"), 25) {
+        return;
+    }
     #[cfg(windows)]
     {
         win_wait_for_previous_pid_if_requested();
@@ -2257,13 +2329,8 @@ pub fn run() {
         linux_configure_display_env();
     }
 
-    let mut initial_settings = load_settings();
-    // Respect persisted `clickThroughLocked` across restarts (Issue #41).
-    // Emergency CLI escape hatch: launching with `--unlock` clears click-through lock immediately.
-    if std::env::args().any(|a| a == "--unlock") && initial_settings.click_through_locked {
-        initial_settings.click_through_locked = false;
-        save_settings(&initial_settings);
-    }
+    // Respect persisted `clickThroughLocked` across restarts (Issue #41); `--unlock` was handled above.
+    let initial_settings = load_settings();
     let settings_arc = Arc::new(Mutex::new(initial_settings.clone()));
     let menu_open = Arc::new(AtomicBool::new(false));
     let menu_creating = Arc::new(AtomicBool::new(false));

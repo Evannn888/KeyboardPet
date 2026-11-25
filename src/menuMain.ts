@@ -28,6 +28,8 @@ interface AppSettings {
   renderMode?: '2d' | '3d';
   collarColor?: 'none' | 'red' | 'blue' | 'pink' | 'green';
   headphoneMode?: 'auto' | 'on' | 'off';
+  /** 30 = power saving; anything else follows the display (up to 60). */
+  fpsCap?: number;
 }
 
 interface UpdateInfo {
@@ -84,11 +86,13 @@ let settings: AppSettings = {
   renderMode: '3d',
   collarColor: 'none',
   headphoneMode: 'off',
+  fpsCap: 0,
 };
 
 let catList: CatSkinConfig[] = [...DEFAULT_BUILTIN_CATS];
 let sliderDragging = false;
-let currentAppVersion = '5.1.0';
+let currentAppVersion = '5.1.2';
+let settingsPatchSeq = 0;
 let cachedUpdateInfo: UpdateInfo | null = null;
 let updateBusy = false;
 let activeTab: MenuTabId = 'appearance';
@@ -211,6 +215,11 @@ function syncUI(): void {
       ? settings.tailKeyMode
       : 'smart';
   const tailIds = Array.isArray(settings.tailKeyIds) ? settings.tailKeyIds : [...DEFAULT_TAIL_KEY_IDS];
+  const fpsCap = settings.fpsCap === 30 ? '30' : '0';
+  document.querySelectorAll<HTMLButtonElement>('[data-fpscap]').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.fpscap === fpsCap);
+  });
+
   document.querySelectorAll<HTMLButtonElement>('[data-tailmode]').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.tailmode === tailMode);
   });
@@ -264,9 +273,13 @@ function syncUI(): void {
 }
 
 async function applySettingsPatch(patch: Partial<AppSettings>): Promise<void> {
+  // Quick clicks: only the newest answer counts, so an older one cannot undo a later choice.
+  const seq = ++settingsPatchSeq;
   settings = { ...settings, ...patch };
   syncUI();
-  settings = await invoke<AppSettings>('update_settings', { patch: settings });
+  const updated = await invoke<AppSettings>('update_settings', { patch: settings });
+  if (seq !== settingsPatchSeq) return;
+  settings = updated;
   syncUI();
 }
 
@@ -480,9 +493,15 @@ async function bootstrap(): Promise<void> {
     }
 
     const target = (e.target as HTMLElement).closest<HTMLElement>(
-      '[data-action], [data-breed], [data-rendermode], [data-collar], [data-headphonemode], [data-kblayout], [data-kborient], [data-tailmode]',
+      '[data-action], [data-breed], [data-rendermode], [data-collar], [data-headphonemode], [data-kblayout], [data-kborient], [data-tailmode], [data-fpscap]',
     );
     if (!target) return;
+
+    const fpsAttr = target.dataset.fpscap;
+    if (fpsAttr === '0' || fpsAttr === '30') {
+      void applySettingsPatch({ fpsCap: fpsAttr === '30' ? 30 : 0 });
+      return;
+    }
 
     const headphoneAttr = target.dataset.headphonemode;
     if (headphoneAttr === 'auto' || headphoneAttr === 'on' || headphoneAttr === 'off') {
