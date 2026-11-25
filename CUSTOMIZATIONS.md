@@ -8,6 +8,8 @@ Its body is one rigid plush that rocks and nods but never stretches, so its shap
 
 At launch the desktop window draws nothing until the saved pet is known, so the default cat no longer flashes by first.
 
+In 2D the chinchilla's outlines, white border and drop shadow are painted as a few combined paths instead of one call per shape, which halves the drawing work of each frame (about 6 ms to 3 ms in macOS WebKit at its usual size) without changing its look.
+
 Shared palette and outlines live in `src/chinchillaStyle.ts`; the 2D renderer is `src/chinchilla2d.ts`, the 3D sculpt is `src/chinchillaModel.ts`, and the 3D sticker border is `src/stickerPass3d.ts`. Existing skins remain selectable.
 
 The keyboard's rear edge is raised toward the viewer and the camera is slightly higher, making the key rows and legends easier to see. The pet also has more compact proportions, with its idle paws raised to clear the keyboard.
@@ -29,4 +31,21 @@ macOS ties the Accessibility and Input Monitoring grants to the app's signature.
 
 Open the pet's right-click menu or tray menu and choose **我家龙猫**; it looks the same with **3D 立体** on or off. Its reproducible color configuration is in [`customizations/my-chinchilla.json`](customizations/my-chinchilla.json); the `my-chinchilla` ID enables the dedicated renderer.
 
-The upstream in-app updater installs official KuroCat releases and can replace these customizations. To keep the custom model, update this fork's source and rebuild it instead. Reference photos, local settings, credentials, and generated app bundles are not part of the source changes.
+An official KuroCat release would replace the whole app, chinchilla included, so this fork's updater only announces new releases and opens their page; it never installs them. Bring upstream changes in by merging them into this source and rebuilding. Reference photos, local settings, credentials, and generated app bundles are not part of the source changes.
+
+## Changes taken from upstream v5.1.2
+
+Only the fixes that matter here were merged, adapted where they touch the chinchilla:
+
+- macOS: keyboard and mouse input reconnects after the Mac wakes from sleep, and the event tap no longer waits on a blocked keyboard driver;
+- macOS: dragging the pet starts straight from the mouse press, so it no longer fails silently;
+- a second copy of the app quits instead of showing a second pet;
+- the tail no longer buzzes while tail keys are typed in quick succession;
+- switching between 2D and 3D recovers when the GPU drops the 3D canvas, and 3D's memory is given back after 8 seconds in 2D;
+- an optional 30 fps cap (**帧率上限** in the menu) for battery life.
+
+Left out: the AI companion hooks, MCP face and ear shaping, the five interface languages, removing the cats' 2D shadows, the smaller 3D key textures (their letters break up at small sizes), the grumpy wake-up, the automatic macOS permission reset (it is for ad hoc builds), and fixes for Windows and Linux only.
+
+## Local servers
+
+The MCP server (`127.0.0.1:27420`, on by default) and the OBS browser source (`127.0.0.1:27421`, off by default, streams every key press) only answer programs on this computer. Requests a web page makes are refused with 403: they carry a foreign `Origin`, a cross-site `Sec-Fetch-Site`, or, for a site that points its own name at 127.0.0.1, a foreign `Host`.
