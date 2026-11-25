@@ -596,9 +596,9 @@ export class KeyboardAndMouse3D {
       depthTest: false,
     });
 
-    // Subtle playful KuroCat keyboard tilt matching original catEngine.ts
-    this.boardGroup.position.set(0.24, 0.015, 1.08);
-    this.boardGroup.rotation.set(0.06, -0.042, 0);
+    // Lift the rear edge toward the viewer so rows and key legends stay readable.
+    this.boardGroup.position.set(0.24, 0.11, 1.08);
+    this.boardGroup.rotation.set(0.22, -0.042, 0);
     this.deskGroup.add(this.boardGroup);
 
     // Build Cordless KuroCat Oval Split-Plate Mini Mouse
@@ -817,14 +817,16 @@ export class KeyboardAndMouse3D {
     this.boardH = 0.112;
     this.capH = is108 ? 0.048 : 0.056;
 
-    this.boardGroup.position.set(0.24, 0.015, 1.08);
+    this.boardGroup.position.set(0.24, 0.11, 1.08);
     this.mouseHome.set(is108 ? -1.46 : -1.16, 0.015, 0.96);
 
     // Soft grounded desk shadow under keyboard
     const kbShadowGeo = new THREE.PlaneGeometry(W * 1.18, D * 1.38);
     const kbShadow = new THREE.Mesh(kbShadowGeo, this.kbShadowMat);
-    kbShadow.rotation.x = -Math.PI / 2;
-    kbShadow.position.set(0, 0.002, 0.025);
+    // Counter the board transform to keep its shadow flat on the desk.
+    kbShadow.quaternion.copy(this.boardGroup.quaternion).invert();
+    kbShadow.position.set(0, 0.002 - this.boardGroup.position.y, 0.025).applyQuaternion(kbShadow.quaternion);
+    kbShadow.rotateX(-Math.PI / 2);
     this.boardDisposables.push(kbShadowGeo);
 
     // Merge baseChassis + topBezel + plate into 1 single vertex-colored draw call!

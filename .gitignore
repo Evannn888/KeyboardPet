@@ -3,6 +3,7 @@ dist/
 dist-web/
 src-tauri/target/
 src-tauri/target-win7/
+src-tauri/gen/schemas/macOS-schema.json
 *.exe
 *.msi
 *.log

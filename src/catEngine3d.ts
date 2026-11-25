@@ -31,8 +31,8 @@ const COLLAR_COLORS: Record<Exclude<CollarColorId, 'none'>, string> = {
   green: '#4fa368',
 };
 
-const EYE_MAX_RX = 0.175;
-const EYE_MAX_RY = 0.160;
+const EYE_MAX_RX = 0.180;
+const EYE_MAX_RY = 0.195;
 const Z_SCALE = 0.82;
 const BODY_H = 1.98;
 const HEAD_CY = 1.56;
@@ -539,6 +539,10 @@ export class KuroCatEngine3D {
     blush: THREE.Mesh;
   }> = [];
   private readonly faceGroup = new THREE.Group();
+  private readonly chinchillaFace = new THREE.Group();
+  private readonly chinchillaEarDetails: THREE.Group[] = [];
+  private classicWhiskers: THREE.Mesh | null = null;
+  private isChinchilla = false;
 
   // Shared materials updated on skin switch
   private readonly pawMat: THREE.ShaderMaterial;
@@ -658,9 +662,9 @@ export class KuroCatEngine3D {
 
   // Turntable 360° orbit camera springs (0 = iconic KuroCat elevated front angle)
   private orbitAzimuthTarget = 0;
-  private orbitElevTarget = 24.5;
+  private orbitElevTarget = 30;
   private readonly sOrbitAz = new Spring1D(0, 4.2, 0.86);
-  private readonly sOrbitEl = new Spring1D(24.5, 4.2, 0.86);
+  private readonly sOrbitEl = new Spring1D(30, 4.2, 0.86);
   private readonly camAnchor = new THREE.Vector3(0.06, 0.82, 0.36);
 
   // State machine
@@ -779,7 +783,8 @@ export class KuroCatEngine3D {
 
     // 1) Original KuroCat Continuous One-Piece Mochi-Pear Silhouette (exact BODY_SLICES proportions!)
     this.catRoot.position.copy(this.homePos);
-    this.catRoot.scale.setScalar(0.90);
+    // Compact kitten proportions, with a broader face and shorter seated torso.
+    this.catRoot.scale.set(0.90, 0.78, 0.90);
     this.scene.add(this.catRoot);
 
     // Soft studio contact shadow underneath the plush sitting body
@@ -796,22 +801,22 @@ export class KuroCatEngine3D {
     catShadow.position.set(0, 0.003, 0.02);
     this.catRoot.add(catShadow);
 
-    // Exact measured KuroCat BODY_SLICES (forehead 49 -> cheeks 60 -> plush neck 52 -> chest 62 -> belly 70 -> thighs 73 -> base 46)
+    // Broad rounded cheeks over a compact torso, keeping one continuous surface.
     const bodyCurve = new THREE.CatmullRomCurve3(
       [
         [0.0, 0.0],
         [0.46, 0.006],
-        [0.60, 0.06],
-        [0.74, 0.19],
-        [0.80, 0.43], // widest soft thighs!
-        [0.76, 0.67], // plump belly
-        [0.68, 0.91], // mid chest
-        [0.60, 1.12], // upper chest
-        [0.57, 1.32], // gentle plush neck (NO skinny KeyCat neck!)
-        [0.65, 1.50], // chubby cheeks widest
-        [0.61, 1.69], // eye line
-        [0.52, 1.87], // forehead
-        [0.34, 1.948], // crown shoulder
+        [0.56, 0.06],
+        [0.67, 0.19],
+        [0.71, 0.43], // soft seated hips
+        [0.69, 0.67], // compact belly
+        [0.63, 0.91], // mid chest
+        [0.57, 1.12], // upper chest
+        [0.61, 1.32], // soft transition into cheeks
+        [0.74, 1.50], // round cheeks
+        [0.70, 1.69], // wider eye line
+        [0.58, 1.87], // rounded forehead
+        [0.37, 1.948], // crown shoulder
         [0.0, BODY_H], // smooth rounded crown peak
       ].map(([r, y]) => new THREE.Vector3(r, y, 0)),
       false,
@@ -922,9 +927,9 @@ export class KuroCatEngine3D {
     earGeo.setAttribute('rest', earGeo.attributes.position.clone());
     for (const s of [-1, 1] as const) {
       const g = new THREE.Group();
-      g.position.set(s * 0.295, 0.255, -0.015);
+      g.position.set(s * 0.35, 0.255, -0.015);
       g.rotation.set(-0.06, 0, -s * 0.06);
-      g.scale.set(1.0, 1.04, 1.0);
+      g.scale.set(0.94, 1.0, 0.94);
       const mesh = new THREE.Mesh(earGeo, this.furSystem.createMaterial('EAR', s));
       mesh.scale.set(1, 1, 0.56);
       g.add(mesh);
@@ -935,7 +940,7 @@ export class KuroCatEngine3D {
 
     // 6) Curved Surface-Conforming KuroCat Eyes + Petting Lazy Slits + Closed Sleep Arcs + Soft Blush
     for (const s of [-1, 1] as const) {
-      const lx = s * 0.232;
+      const lx = s * 0.25;
       const ly = 0.105; // headMount local -> world y = 1.665 (exact KuroCat eye line!)
 
       const eyeGeo = this.makeCurvedFacePatchGeo(lx, ly, EYE_MAX_RX, EYE_MAX_RY, 0.024, 20);
@@ -1012,6 +1017,7 @@ export class KuroCatEngine3D {
       const mergedWhiskers = mergeStaticGeometries(whiskerGeos);
       for (const w of whiskerGeos) w.geo.dispose();
       const whiskerMesh = new THREE.Mesh(mergedWhiskers, this.whiskerMat);
+      this.classicWhiskers = whiskerMesh;
       whiskerMesh.renderOrder = 12;
       this.headMount.add(whiskerMesh);
     }
@@ -1041,6 +1047,8 @@ export class KuroCatEngine3D {
       this.faceGroup.add(noseMesh, mouth.mesh);
       this.headMount.add(this.faceGroup);
     }
+
+    this.buildChinchillaDetails();
 
     // 8b) Sculpted 3D Gaming Headset (auto-equipped on PC game detection or manual toggle!)
     this.buildGamingHeadset();
@@ -1125,6 +1133,82 @@ export class KuroCatEngine3D {
     this.scene.add(this.angerSprite);
 
     this.resize();
+  }
+
+  /** Rounded ears, mottling and short muzzle matching the owner's chinchilla. */
+  private buildChinchillaDetails(): void {
+    const outerMat = createHeadsetMaterial('#aaa8a4', 0.015, 0.025, '#e5e0d9');
+    const innerMat = createHeadsetMaterial('#ddccc6', 0.01, 0.025, '#eee4df');
+    const spotMat = new THREE.MeshBasicMaterial({ color: '#817a72' });
+    const muzzleMat = createHeadsetMaterial('#e9e5dc', 0.01, 0.025, '#f5f0e8');
+    const sphere = new THREE.SphereGeometry(1, 28, 20);
+    const spots: Array<[number, number, number]> = [
+      [-0.11, 0.40, 0.025], [-0.05, 0.45, 0.020], [0.04, 0.43, 0.023],
+      [0.13, 0.36, 0.029], [0.17, 0.26, 0.020], [0.10, 0.25, 0.022],
+      [-0.15, 0.29, 0.021], [-0.09, 0.22, 0.016], [0.02, 0.34, 0.017],
+      [0.15, 0.13, 0.022], [-0.02, 0.13, 0.016], [0.07, 0.07, 0.015],
+    ];
+    for (const ear of this.ears) {
+      const detail = new THREE.Group();
+      const outer = new THREE.Mesh(sphere, outerMat);
+      outer.position.set(0, 0.18, 0);
+      outer.scale.set(0.30, 0.40, 0.080);
+      const inner = new THREE.Mesh(sphere, innerMat);
+      inner.position.set(0, 0.19, 0.050);
+      inner.scale.set(0.245, 0.335, 0.041);
+      detail.add(outer, inner);
+      for (const [i, [sx, sy, r]] of spots.entries()) {
+        const x = sx * (ear.s < 0 ? 1 : -0.93);
+        const y = sy + (ear.s < 0 ? 0 : Math.sin(i * 2.1) * 0.025);
+        const z = 0.052 + 0.041 * Math.sqrt(Math.max(0, 1 - (x / 0.245) ** 2 - ((y - 0.19) / 0.335) ** 2));
+        const spot = new THREE.Mesh(new THREE.CircleGeometry(r, 9), spotMat);
+        spot.position.set(x, y, z + 0.003);
+        spot.scale.set(1, 0.72 + (i % 3) * 0.16, 1);
+        spot.rotation.z = i * 1.83;
+        detail.add(spot);
+      }
+      detail.visible = false;
+      ear.group.add(detail);
+      this.chinchillaEarDetails.push(detail);
+      this.petMeshes.push(outer);
+    }
+
+    const muzzleZ = this.surfaceZ(0, -0.10);
+    for (const side of [-1, 1]) {
+      const cheek = new THREE.Mesh(sphere, muzzleMat);
+      cheek.scale.set(0.175, 0.115, 0.075);
+      cheek.position.set(side * 0.115, -0.105, muzzleZ + 0.012);
+      this.chinchillaFace.add(cheek);
+    }
+    const nose = new THREE.Mesh(sphere, this.noseMat);
+    nose.position.set(0, -0.052, muzzleZ + 0.098);
+    nose.scale.set(0.053, 0.032, 0.022);
+    this.chinchillaFace.add(nose);
+    const mouth = new TaperTube3D(20, 5, this.mouthMat, 12);
+    mouth.update((t, out) => {
+      const x = mix(-0.047, 0.047, t);
+      out.set(x, -0.105 - 0.014 * Math.sin(t * Math.PI), muzzleZ + 0.088);
+    }, () => 0.0035);
+    this.chinchillaFace.add(mouth.mesh);
+
+    const whiskerGeos: Array<{ geo: THREE.BufferGeometry }> = [];
+    for (const side of [-1, 1]) {
+      for (let i = 0; i < 4; i++) {
+        const whisker = new TaperTube3D(10, 4, this.whiskerMat, 12);
+        whisker.update((t, out) => {
+          out.set(
+            side * mix(0.14, 1.00 - (i % 2) * 0.08, t),
+            -0.11 + (i - 1.5) * 0.022 + (i - 1.5) * 0.038 * t,
+            muzzleZ + 0.095 - 0.17 * t * t,
+          );
+        }, (t) => 0.0036 * (1 - 0.68 * t));
+        whiskerGeos.push({ geo: whisker.mesh.geometry });
+      }
+    }
+    this.chinchillaFace.add(new THREE.Mesh(mergeStaticGeometries(whiskerGeos), this.whiskerMat));
+    for (const item of whiskerGeos) item.geo.dispose();
+    this.chinchillaFace.visible = false;
+    this.headMount.add(this.chinchillaFace);
   }
 
   /**
@@ -1530,6 +1614,8 @@ export class KuroCatEngine3D {
   };
 
   public setCatSkin(skin: CatSkinConfig): void {
+    const wasChinchilla = this.isChinchilla;
+    this.isChinchilla = skin.id === 'my-chinchilla';
     this.currentSkin = skin;
     const p = resolveFurPalette3D(skin, this.renderStyle);
     this.currentPalette = p;
@@ -1545,12 +1631,30 @@ export class KuroCatEngine3D {
     this.tuckLineMat.color.set(p.isDarkFur ? '#b2b8c4' : '#7b6e64');
     this.tuckLineMat.opacity = p.isDarkFur ? 0.36 : 0.24;
 
-    this.faceGroup.visible = Boolean(p.nose);
+    this.faceGroup.visible = Boolean(p.nose) && !this.isChinchilla;
+    this.chinchillaFace.visible = this.isChinchilla;
+    if (this.classicWhiskers) this.classicWhiskers.visible = !this.isChinchilla;
+    this.ears.forEach((ear, i) => {
+      ear.mesh.visible = !this.isChinchilla;
+      this.chinchillaEarDetails[i].visible = this.isChinchilla;
+    });
     if (p.nose) this.noseMat.color.set(p.nose);
     if (p.mouth) this.mouthMat.color.set(p.mouth);
 
     const lashCol = p.isDarkFur ? '#0b0c10' : p.lid;
     for (const e of this.eyes) {
+      if (wasChinchilla !== this.isChinchilla) {
+        e.mesh.geometry.dispose();
+        e.mesh.geometry = this.makeCurvedFacePatchGeo(
+          e.s * (this.isChinchilla ? 0.33 : 0.25), 0.105,
+          this.isChinchilla ? 0.145 : EYE_MAX_RX,
+          this.isChinchilla ? 0.175 : EYE_MAX_RY, 0.024, 20,
+        );
+        const dx = this.isChinchilla ? e.s * 0.08 : 0;
+        const dz = this.isChinchilla ? this.surfaceZ(0.33, 0.105) - this.surfaceZ(0.25, 0.105) : 0;
+        e.closedArc.position.set(dx, 0, dz);
+        e.squintSlit.position.set(dx, 0, dz);
+      }
       (e.mat.uniforms.uEyeTop.value as THREE.Color).set(p.eyeTop);
       (e.mat.uniforms.uEyeBottom.value as THREE.Color).set(p.eyeBottom);
       (e.mat.uniforms.uPupilCol.value as THREE.Color).set(p.pupil);
@@ -1652,7 +1756,7 @@ export class KuroCatEngine3D {
 
   public resetOrbit(): void {
     this.orbitAzimuthTarget = 0;
-    this.orbitElevTarget = 24.5;
+    this.orbitElevTarget = 30;
     this.wakeRendering();
   }
 
@@ -1874,7 +1978,13 @@ export class KuroCatEngine3D {
     if (insideCanvas && allowPetting && !this.leftMouseDown && !this.rightMouseDown) {
       this.raycaster.setFromCamera(this.cursorNdc, this.camera);
       const hits = this.raycaster.intersectObjects(this.petMeshes, false);
-      overHead = hits.length > 0 && hits[0].point.y >= 1.15;
+      const hit = hits.find((candidate) => {
+        for (let object: THREE.Object3D | null = candidate.object; object; object = object.parent) {
+          if (!object.visible) return false;
+        }
+        return true;
+      });
+      overHead = Boolean(hit && hit.point.y >= 1.0);
       if (overHead) {
         this.petting = true;
         this.petUntil = this.elapsed + 0.30;
@@ -2269,7 +2379,10 @@ export class KuroCatEngine3D {
       const airplaneFold = cross * 0.56;
       e.group.rotation.z = -e.s * (e.tilt + airplaneFold - earState * 0.28 + flick);
       e.group.rotation.x = -0.06 - cross * 0.14 + curious * 0.10;
-      e.group.position.set(e.s * (0.295 + cross * 0.06), 0.255 - cross * 0.045, -0.015);
+      e.group.position.set(
+        e.s * ((this.isChinchilla ? 0.49 : 0.35) + cross * 0.06),
+        (this.isChinchilla ? 0.33 : 0.255) - cross * 0.045, -0.015,
+      );
     }
 
     // 7) Iconic KuroCat Eyes: open / curious / grumpy zero-seam / petting lazy slits / sleep arcs
@@ -2397,7 +2510,7 @@ export class KuroCatEngine3D {
 
     this.tailLimb.update(
       (u, out) => this.tailCurve.getPoint(u, out),
-      (u) => mix(0.068, 0.044, u) * (1 - 0.12 * Math.sin(u * Math.PI)),
+      (u) => mix(this.isChinchilla ? 0.105 : 0.068, this.isChinchilla ? 0.073 : 0.044, u) * (1 - 0.12 * Math.sin(u * Math.PI)),
     );
 
     // 9) Sleek Unified KuroCat Arms + Cozy Tucked Idle Belly Paws!
@@ -2407,7 +2520,7 @@ export class KuroCatEngine3D {
       const wantTuck = !activeForMouse && !activeForKey ? 1 : 0;
       paw.tuckWeight += (wantTuck - paw.tuckWeight) * approach(wantTuck ? 6.5 : 22, dt);
 
-      this.tmpPawLocal.set(paw.side * 0.24, 0.16 - this.sleepAmt * 0.06, 0.54);
+      this.tmpPawLocal.set(paw.side * 0.24, 0.40 - this.sleepAmt * 0.06, 0.54);
       const tuckHome = this.attachLocal(this.tmpPawLocal, this.tmpV3);
 
       if (activeForMouse) {
@@ -2481,7 +2594,11 @@ export class KuroCatEngine3D {
       // Soft sculpted plush paw resting cleanly right behind top edge of keyboard when calm
       const pawScale = mix(1.0, 0.94, tuck);
       arm.paw.position.set(arm.hand.x, arm.hand.y - 0.010, arm.hand.z + 0.014);
-      arm.paw.scale.set(0.126 * pawScale, 0.080 * pawScale, 0.118 * pawScale);
+      arm.paw.scale.set(
+        (this.isChinchilla ? 0.095 : 0.126) * pawScale,
+        (this.isChinchilla ? 0.065 : 0.080) * pawScale,
+        (this.isChinchilla ? 0.102 : 0.118) * pawScale,
+      );
       arm.paw.rotation.y = Math.atan2(arm.hand.x - arm.c2.x, Math.max(0.1, arm.hand.z - arm.c2.z)) * 0.42;
     }
 

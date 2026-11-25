@@ -83,6 +83,47 @@ export function resolveFurPalette3D(skin: CatSkinConfig, style: RenderStyle3D): 
   const accentRight = isWarmAccent ? '#58c7ff' : '#ff7b3b';
 
   switch (skin.id) {
+    case 'my-chinchilla':
+      return {
+        id: 'my-chinchilla',
+        fur: '#aaa8a4',
+        light: '#f3eee3',
+        dark: '#8b8985',
+        patchA: '#aaa8a4',
+        patchB: '#aaa8a4',
+        point: '#aaa8a4',
+        earOuter: '#aaa8a4',
+        tailBase: '#999792',
+        inner: '#c6b6b0',
+        stripes: 0,
+        // A separate soft undercoat mask follows the chinchilla's jaw and chest.
+        muzzle: 0,
+        bib: 0,
+        calico: 0,
+        tuxedo: 0,
+        points: 0,
+        // Rounded ears have their own inner-ear geometry, rather than the cat-ear mask.
+        innerAmt: 0,
+        shade: is3D ? 0.74 : 0,
+        paw: '#d9d2c8',
+        pawTuckLine: 'rgba(119, 111, 101, 0.24)',
+        toe: '#aaa095',
+        whisker: '#f7f3e9',
+        whiskerOpacity: 0.90,
+        nose: '#d8aaa6',
+        mouth: '#756963',
+        eyeTop: '#201e1c',
+        eyeBottom: '#3b352f',
+        pupil: '#0d0c0b',
+        lid: '#544f49',
+        squintLine: '#544f49',
+        eyeCatchlight: true,
+        isDarkFur: false,
+        lightContour: '#777570',
+        accent: skin.accentColor || '#9bb8aa',
+        accentRight: '#dfb9a4',
+        accentSide: skin.accentSideColor || '#698c7d',
+      };
     case 'black':
       return {
         id: 'black',
@@ -166,12 +207,12 @@ export function resolveFurPalette3D(skin: CatSkinConfig, style: RenderStyle3D): 
     case 'orange-tabby':
       return {
         id: 'orange-tabby',
-        fur: '#ef9e4b',
+        fur: '#eeb573',
         light: '#fff4e0',
-        dark: '#b75816',
-        patchA: '#ef9e4b',
-        patchB: '#ef9e4b',
-        point: '#ef9e4b',
+        dark: '#b97940',
+        patchA: '#eeb573',
+        patchB: '#eeb573',
+        point: '#eeb573',
         earOuter: null,
         tailBase: null,
         inner: '#f4b8ae',
@@ -190,8 +231,8 @@ export function resolveFurPalette3D(skin: CatSkinConfig, style: RenderStyle3D): 
         whiskerOpacity: 0.68,
         nose: '#ee8d98',
         mouth: '#86502d',
-        eyeTop: '#b96c14',
-        eyeBottom: '#ffd66b',
+        eyeTop: '#9c692e',
+        eyeBottom: '#f7d58c',
         pupil: '#15120e',
         lid: '#6b3b15',
         squintLine: '#6b3b15',
@@ -398,6 +439,7 @@ export class FurShaderSystem {
       uInnerAmt: { value: 0.5 },
       uShade: { value: 1.0 },
       uIsDarkFur: { value: 1.0 },
+      uIsChinchilla: { value: 0.0 },
       uPawColor: { value: new THREE.Color('#151417') },
       uEarOuter: { value: new THREE.Color('#141315') },
       uEarOuterAmt: { value: 0 },
@@ -516,7 +558,7 @@ export class FurShaderSystem {
 
     const fragmentShader = `
       uniform vec3 uFur, uLight, uDark, uPatchA, uPatchB, uPoint, uInner, uPawColor, uEarOuter, uTailBase;
-      uniform float uStripes, uMuzzle, uBib, uCalico, uTuxedo, uPoints, uInnerAmt, uShade, uIsDarkFur, uEarOuterAmt, uTailBaseAmt;
+      uniform float uStripes, uMuzzle, uBib, uCalico, uTuxedo, uPoints, uInnerAmt, uShade, uIsDarkFur, uIsChinchilla, uEarOuterAmt, uTailBaseAmt;
       uniform int uSpotCount;
       uniform vec4 uSpotPos[${MAX_CUSTOM_SPOTS}];
       uniform vec4 uSpotCol[${MAX_CUSTOM_SPOTS}];
@@ -695,6 +737,22 @@ export class FurShaderSystem {
           col = mix(col, uLight, light);
           col = mix(col, uInner, inner * uInnerAmt);
 
+          #ifdef CAT_BODY
+            if (uIsChinchilla > 0.5) {
+              // Ivory undercoat rises into the chin, fading softly into silver cheeks.
+              // The angular front mask keeps the back and outer flanks naturally gray.
+              float frontAngle = abs(atan(p.x, p.z));
+              float frontCoat = 1.0 - smoothstep(0.78, 1.14, frontAngle);
+              float jawLine = 1.48 - 0.30 * smoothstep(0.10, 0.62, abs(p.x));
+              float undercoat = (1.0 - smoothstep(jawLine - 0.10, jawLine + 0.08, p.y)) * frontCoat;
+              vec2 cheekPos = vec2(abs(p.x) - 0.32, p.y - 1.46) / vec2(0.29, 0.23);
+              float cheekSilver = (1.0 - smoothstep(0.35, 1.30, length(cheekPos)))
+                                * smoothstep(0.10, 0.40, p.z);
+              col = mix(col, mix(uFur, uLight, 0.34), cheekSilver * 0.58);
+              col = mix(col, uLight, undercoat);
+            }
+          #endif
+
           // Full MCP custom spots/birthmarks support on head, body, leftArm, and rightArm!
           if (uSpotCount > 0) {
             for (int si = 0; si < ${MAX_CUSTOM_SPOTS}; si++) {
@@ -747,6 +805,14 @@ export class FurShaderSystem {
             }
           }
         #endif
+
+        if (uIsChinchilla > 0.5) {
+          // Rest-space, low-contrast coat grain: one fragment sample, no extra meshes
+          // or per-frame CPU work. Broad tonal variation keeps the dense fur matte.
+          float grain = fract(sin(dot(floor(p * 118.0), vec3(12.9898, 78.233, 39.425))) * 43758.5453);
+          float softFur = sin(p.x * 15.0 + p.y * 8.0) * sin(p.z * 13.0 - p.y * 9.0);
+          col *= 1.0 + (grain - 0.5) * 0.026 + softFur * 0.008;
+        }
 
         // Designer-vinyl / soft matte-velvet 3D studio lighting (inspired by KuroCat app icon — ZERO KeyCat white outline!)
         vec3 n = normalize(vNormal);
@@ -821,6 +887,7 @@ export class FurShaderSystem {
     this.uniforms.uInnerAmt.value = p.innerAmt;
     this.uniforms.uShade.value = p.shade;
     this.uniforms.uIsDarkFur.value = p.isDarkFur ? 1.0 : 0.0;
+    this.uniforms.uIsChinchilla.value = p.id === 'my-chinchilla' ? 1.0 : 0.0;
     if (p.earOuter) {
       setColor('uEarOuter', p.earOuter);
       this.uniforms.uEarOuterAmt.value = 1.0;
