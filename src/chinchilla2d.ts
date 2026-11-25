@@ -4,6 +4,7 @@ import {
   BODY_H,
   BODY_PATH,
   BODY_START,
+  BODY_WIDTH,
   CHIN,
   CUFF,
   EAR_FRECKLES,
@@ -12,12 +13,14 @@ import {
   EAR_ROOT,
   EAR_START,
   FACE_H,
+  HIP_IN,
   IDLE_PAW,
   TAIL_CORE,
   TAIL_INNER,
   TAIL_PUFFS,
   TAIL_TAP_SCALE,
   WHISKERS,
+  widthAt,
   type Cubic,
 } from './chinchillaStyle';
 
@@ -248,7 +251,7 @@ export function paintFaceMarkings(ctx: Ctx, p: FaceMarkingState): void {
 
   for (const s of [-1, 1]) {
     ctx.save();
-    ctx.translate(s * 65 + tn * 0.85, 19.5);
+    ctx.translate(s * 65 * BODY_WIDTH.head + tn * 0.85, 19.5);
     ctx.scale(1, 0.7);
     const r = 18 + p.squint * 3;
     const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
@@ -309,10 +312,10 @@ const PAW_PATH: readonly Cubic[] = [
   [[20.2, -5], [17.4, -9], [17.4, -15]],
 ];
 /**
- * Half-width of the sleeve at the shoulder and wrist, how far the wrist sits from the paw's centre, and the
- * length of the straight stub an idle arm is.
+ * Half-width of the sleeve at the shoulder and wrist, how far the wrist sits from the paw's centre, the
+ * length of the straight stub an idle arm is, and how close to the middle of the chest a shoulder may sit.
  */
-const SLEEVE = { shoulder: 18.5, wrist: 17.4, reach: 15, stub: 30, steps: 36 } as const;
+const SLEEVE = { shoulder: 18.5, wrist: 17.4, reach: 15, stub: 30, steps: 36, chest: 26 } as const;
 
 interface ArmShape {
   /** Sleeve edges from shoulder to wrist. */
@@ -399,6 +402,8 @@ export class Chinchilla2D {
     ctx.scale(s, 1);
     ctx.translate(EAR_ROOT.x + droop * 8, EAR_ROOT.y);
     ctx.rotate(EAR_ROOT.lean + droop * 1.15 - Math.max(0, p.earPerk) * 0.9 - twitch);
+    // Ears keep their size relative to the head.
+    ctx.scale(BODY_WIDTH.head, BODY_WIDTH.head);
     fn();
     ctx.restore();
   }
@@ -423,16 +428,16 @@ export class Chinchilla2D {
     const { end, stretch, squash, sway, side: s, limit } = p.tail;
     const root = p.spine(34);
     const rest = (px: number, ph: number): Pt => {
-      const x = p.spine(ph * 0.5).x + px - (root.x + 92);
+      const x = p.spine(ph * 0.5).x + px - (root.x + 92 - HIP_IN);
       const y = 34 - ph;
       const cos = Math.cos(sway);
       const sin = Math.sin(sway);
-      return { x: root.x + 92 + x * cos - y * sin, y: root.y + x * sin + y * cos - p.sleep * ph * 0.16 };
+      return { x: root.x + 92 - HIP_IN + x * cos - y * sin, y: root.y + x * sin + y * cos - p.sleep * ph * 0.16 };
     };
     const go = clamp01(stretch);
     const core = rest(TAIL_CORE[0], TAIL_CORE[1]);
     const shrink = lerp(1, TAIL_TAP_SCALE, ease(0, s > 0 ? 0.6 : 0.3, go));
-    const flank = root.x + s * 124;
+    const flank = root.x + s * (124 - HIP_IN);
     // How far round the flank it is; crossing over behind the body takes the first half of the way.
     const round = s > 0 ? go : clamp01(go * 2 - 1);
     let at = core;
@@ -468,7 +473,7 @@ export class Chinchilla2D {
     const out = go > 0.02;
     if (out) {
       // Out from the hip, up and over, and down onto the key.
-      const a = { x: root.x + s * 84, y: root.y };
+      const a = { x: root.x + s * (84 - HIP_IN), y: root.y };
       const c = { x: s * Math.max(s * at.x + 12, s * lerp(at.x, flank + s * 26, round)), y: at.y - 40 * round };
       const b = { x: lerp(at.x, flank + s * 38, ease(0, 0.5, round)), y: Math.min(root.y - 16, c.y - 14 * round) };
       for (let i = 0; i <= STALK_STEPS; i++) {
@@ -485,9 +490,15 @@ export class Chinchilla2D {
 
   /** Sleeve and mitten as one outline, from the flank to the toes. */
   private arm(p: ChinchillaPose2D, paw: ChinchillaPaw2D): ArmShape {
-    // The shoulder slides out to the flank when the arm has to reach sideways.
-    const out = ease(0, 80, (paw.x - p.spine(54).x) * paw.side - 62);
-    const root = this.bodyAt(p, paw.side * lerp(66, 87, out), lerp(66, 56, out));
+    // The arm hangs from the chest just above its paw, so it stays short and never reaches across the belly;
+    // for keys out past the body the shoulder slides round to the flank.
+    const reach = (paw.x - p.spine(54).x) * paw.side;
+    const out = ease(0, 80, reach - 62);
+    const flank = 87 * widthAt(56);
+    const chest = 66 * widthAt(66);
+    const across = Math.max(SLEEVE.chest, Math.min(chest, reach * 0.85));
+    const front = ease(chest, SLEEVE.chest, across);
+    const root = this.bodyAt(p, paw.side * lerp(across, flank, out), lerp(lerp(66, 62, front), 56, out));
     const along = Math.atan2(root.x - paw.x, Math.max(1, paw.y - root.y));
     const free = 1 - clamp01(Math.abs(paw.rot) * 2);
     const angle =
@@ -504,8 +515,8 @@ export class Chinchilla2D {
     };
     const len = Math.max(1, Math.hypot(wrist.x - sh.x, wrist.y - sh.y));
 
-    // Elbows hang out and down; a reaching arm runs straight.
-    const bow = len * lerp(0.34, 0.1, out) * (1 - paw.lift);
+    // Elbows hang out and down; a reaching arm, or one hanging straight down in front, runs straight.
+    const bow = len * lerp(lerp(0.34, 0.16, front), 0.1, out) * (1 - paw.lift);
     const b = {
       x: sh.x + lerp(paw.side * bow, from.x * len * 0.38, paw.idle),
       y: sh.y + lerp(len * lerp(0.3, 0.14, out), from.y * len * 0.38, paw.idle),

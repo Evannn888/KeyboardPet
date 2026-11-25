@@ -11,7 +11,19 @@ import { catAudio } from './audio';
 import { resolveCustomSkin, type CatSkinConfig, type ResolvedSkin } from './catSkins';
 import { DaFeiYuRenderer, type DaFeiYuLayout } from './dafeiyuRenderer';
 import { Chinchilla2D, type ChinchillaPose2D } from './chinchilla2d';
-import { BODY_H, CHIN_DESK, CHIN_HEADSET, CHINCHILLA_ID, IDLE_PAW, PAW_REST, SEAT_DROP, SEAT_SHIFT, SEAT_SHIFT_108 } from './chinchillaStyle';
+import {
+  BODY_H,
+  CHIN_DESK,
+  CHIN_HEADSET,
+  CHIN_PAW_ZONE,
+  CHINCHILLA_ID,
+  HIP_IN,
+  IDLE_PAW,
+  PAW_REST,
+  SEAT_DROP,
+  SEAT_SHIFT,
+  SEAT_SHIFT_108,
+} from './chinchillaStyle';
 
 export const LOGICAL_W = 420;
 export const LOGICAL_H = 440;
@@ -514,6 +526,8 @@ export class KuroCatEngine {
     now: number,
   ): boolean {
     if (this.tailKeyMode === 'off') return false;
+    // The chinchilla's tail sits behind it: keys right in front of its belly, like the space bar, are for its paws.
+    if (this.isChinchilla && Math.abs(targetPoint.x - this.chinchillaSeatX) < CHIN_PAW_ZONE) return false;
     if (this.tailKeyMode === 'custom') {
       return this.tailKeyIdSet.has(spec.id);
     }
@@ -2564,7 +2578,7 @@ export class KuroCatEngine {
     this.lastSlamAt = now;
     const hipRight = this.spinePoint(0.84, 0);
     const slamX = this.isChinchilla
-      ? this.chinchillaSeatX + 148
+      ? this.chinchillaSeatX + 148 - HIP_IN
       : Math.min(this.logicalW - 22, hipRight.x + 132);
     const slamY = this.isChinchilla ? this.kbCenterY - this.kbHeight * 0.5 + 4 : hipRight.y + 30;
 

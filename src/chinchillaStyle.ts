@@ -71,6 +71,25 @@ export const CHIN_HEADSET = {
 
 export type Cubic = readonly [readonly [number, number], readonly [number, number], readonly [number, number]];
 
+/**
+ * How wide the body is, as a share of its first, rounder design: at the hips (up to h=40) and at the head
+ * (from h=100), blended in between. The outline, the 3D sculpt and everything that sits on the outline (tail,
+ * shoulders, ears, whiskers, blush) follow it.
+ */
+export const BODY_WIDTH = { hips: 0.84, head: 0.94 } as const;
+
+/** Width share at height h above the seat. */
+export function widthAt(h: number): number {
+  const t = Math.max(0, Math.min(1, (h - 40) / 60));
+  return BODY_WIDTH.hips + (BODY_WIDTH.head - BODY_WIDTH.hips) * t * t * (3 - 2 * t);
+}
+
+/** How far in the flank has come at the hips, for the tail that hangs off it. */
+export const HIP_IN = 113 * (1 - BODY_WIDTH.hips);
+
+const narrowCubics = (segs: readonly Cubic[]): Cubic[] =>
+  segs.map((seg) => seg.map(([x, h]) => [x * widthAt(h), h] as const) as unknown as Cubic);
+
 /** Crown height above the seat. */
 export const BODY_H = 188;
 /** How far the seat sits below the keyboard's far edge. */
@@ -83,16 +102,16 @@ export const FACE_H = 115;
 
 /** Right half of the one-piece silhouette, crown to seat, with fluffy cheek tufts ([x, h]). */
 export const BODY_START: readonly [number, number] = [0, 188];
-export const BODY_PATH: readonly Cubic[] = [
+export const BODY_PATH: readonly Cubic[] = narrowCubics([
   [[6, 194], [11, 193], [15, 190]],
   [[68, 188], [91, 154], [95.5, 118]],
   [[103, 116], [106, 106], [98.5, 101]],
   [[107, 100], [109, 89], [100, 84]],
   [[111, 66], [118, 42], [116, 20]],
   [[114, 6], [104, 0], [89, 0]],
-];
+]);
 /** The same silhouette without tufts, for the 3D lathe: [h, half-width]. */
-export const BODY_PROFILE: ReadonlyArray<readonly [h: number, hw: number]> = [
+export const BODY_PROFILE: ReadonlyArray<readonly [h: number, hw: number]> = ([
   [0, 0],
   [1, 70],
   [5, 98],
@@ -108,7 +127,7 @@ export const BODY_PROFILE: ReadonlyArray<readonly [h: number, hw: number]> = [
   [178, 48],
   [186, 25],
   [188, 0],
-];
+] as const).map(([h, hw]) => [h, hw * widthAt(h)] as const);
 
 /** Scalloped chest and belly fluff ([x, h]), narrow enough to sit between the resting paws. */
 export const BELLY_START: readonly [number, number] = [-45, -6];
@@ -121,13 +140,20 @@ export const BELLY_PATH: readonly Cubic[] = [
 ];
 
 /** Whiskers in face space, right side: start, control, end. They end inside the white border. */
-export const WHISKERS: ReadonlyArray<readonly [number, number, number, number, number, number]> = [
-  [74, 11, 89, 7.5, 105, 8],
-  [74, 20, 89, 20.5, 106, 25],
-];
+export const WHISKERS: ReadonlyArray<readonly [number, number, number, number, number, number]> = (
+  [
+    [74, 11, 89, 7.5, 105, 8],
+    [74, 20, 89, 20.5, 106, 25],
+  ] as const
+).map(([x0, y0, cx, cy, x1, y1]) => {
+  const k = BODY_WIDTH.head;
+  return [x0 * k, y0, cx * k, cy, x1 * k, y1] as const;
+});
 
 /** How far from the body axis the paws wait on the keyboard's edge between keys. */
 export const PAW_REST = 44;
+/** Keys closer than this to the body axis (in 2D px) are pressed by a paw even if they are tail keys. */
+export const CHIN_PAW_ZONE = 72;
 /** Idle hands: centre in body space, turn of the toes, size, and how far the arm comes round from the side. */
 export const IDLE_PAW = { x: 21.5, h: 39.5, rot: 0.66, scale: 0.86, bend: 0.42 } as const;
 
@@ -135,7 +161,7 @@ export const IDLE_PAW = { x: 21.5, h: 39.5, rot: 0.66, scale: 0.86, bend: 0.42 }
 export const CUFF = { y: 12, inner: 20, outer: 22.5 } as const;
 
 /** Ear root in face space (right ear) and its outward lean from upright. */
-export const EAR_ROOT = { x: 52, y: -43, lean: 0.82 } as const;
+export const EAR_ROOT = { x: 52 * BODY_WIDTH.head, y: -43, lean: 0.82 } as const;
 export const EAR_START: readonly [number, number] = [-20, 15];
 export const EAR_PATH: readonly Cubic[] = [
   [[-43, -8], [-41, -66], [0, -68]],
@@ -165,7 +191,7 @@ export const EAR_FRECKLES: Record<'left' | 'right', ReadonlyArray<readonly [numb
 };
 
 /** Cloud tail at rest: [x, h, radius], hip first. */
-export const TAIL_PUFFS: ReadonlyArray<readonly [number, number, number]> = [
+export const TAIL_PUFFS: ReadonlyArray<readonly [number, number, number]> = ([
   [86, 34, 11],
   [91, 36, 12],
   [96, 39, 14],
@@ -182,9 +208,9 @@ export const TAIL_PUFFS: ReadonlyArray<readonly [number, number, number]> = [
   [158, 56, 18.5],
   [145, 80, 18.5],
   [118, 81, 17.5],
-];
+] as const).map(([x, h, r]) => [x - HIP_IN, h, r] as const);
 /** The first puffs lead from the hip into the cloud. */
 export const TAIL_INNER = 10;
 /** Middle of the cloud. To press a key the whole cloud swings over on a stalk, shrunk to `TAIL_TAP_SCALE`. */
-export const TAIL_CORE: readonly [number, number] = [128, 54];
+export const TAIL_CORE: readonly [number, number] = [128 - HIP_IN, 54];
 export const TAIL_TAP_SCALE = 0.58;

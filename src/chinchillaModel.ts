@@ -5,6 +5,7 @@ import {
   BODY_PATH,
   BODY_PROFILE,
   BODY_START,
+  BODY_WIDTH,
   CHIN,
   CHIN_HEADSET,
   EAR_INNER,
@@ -12,6 +13,7 @@ import {
   EAR_ROOT,
   EAR_START,
   FACE_H,
+  HIP_IN,
   TAIL_CORE,
   TAIL_PUFFS,
   WHISKERS,
@@ -65,7 +67,8 @@ export const CHINCHILLA = {
   /** Behind the head's outline, so the head always covers the ears' roots. */
   earZ: -0.24,
   earLean: EAR_ROOT.lean,
-  earScale: 0.94,
+  /** Ears keep their size relative to the head. */
+  earScale: 0.94 * BODY_WIDTH.head,
   inkWidth: 0.019,
   collarY: 0.9,
   /** Arms leave the flank at this height; the angle follows the hand around the body. */
@@ -73,7 +76,9 @@ export const CHINCHILLA = {
   /** Length of the stub an idle arm is, in world units. */
   stub: 30 * PX * 0.86,
   /** Body-local hip the tail swings about, its middle, and the puff that hits the desk when it thumps. */
-  tailHip: new THREE.Vector3(0.8, 0.23, TAIL_Z),
+  tailHip: new THREE.Vector3(0.8 - HIP_IN * PX, 0.23, TAIL_Z),
+  /** How far in the flank has come at the hips (see BODY_WIDTH), in body-local units. */
+  hipIn: HIP_IN * PX,
   tailCore: new THREE.Vector3((TAIL_CORE[0] - 10) * PX, (TAIL_CORE[1] - 12) * PX, TAIL_Z),
   tailTip: 11,
   frontLift: FRONT_LIFT,

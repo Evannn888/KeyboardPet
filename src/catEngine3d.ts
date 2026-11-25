@@ -18,13 +18,14 @@ import {
   buildChinchillaHeadset,
   buildChinchillaHeart,
   chinchillaFlank,
+  chinchillaRadius,
   chinchillaSurfaceZ,
   createChinchillaBodyMaterials,
   createChinchillaEyeMaterial,
   createInkMaterial,
   type ChinchillaFace,
 } from './chinchillaModel';
-import { CHIN_DESK, CHIN_HEADSET, CHINCHILLA_ID, IDLE_PAW, TAIL_INNER, TAIL_TAP_SCALE } from './chinchillaStyle';
+import { CHIN_DESK, CHIN_HEADSET, CHIN_PAW_ZONE, CHINCHILLA_ID, IDLE_PAW, TAIL_INNER, TAIL_TAP_SCALE } from './chinchillaStyle';
 import { StickerPass, markStickerLayer } from './stickerPass3d';
 import {
   FurShaderSystem,
@@ -1500,7 +1501,7 @@ export class KuroCatEngine3D {
     const core = swing(CHINCHILLA.tailCore, this.tmpTailLoose);
     const at = this.tmpTailAttached.copy(core);
     const shrink = mix(1, TAIL_TAP_SCALE, smoothstep(0, s > 0 ? 0.45 : 0.3, go));
-    const flank = this.homePos.x + s * 1.16;
+    const flank = this.homePos.x + s * (1.16 - CHINCHILLA.hipIn * CHINCHILLA.scale);
     // Keep a point at least `room` inside the window's edge on that side.
     this.camera.updateMatrixWorld();
     const inside = (p: THREE.Vector3, room: number): THREE.Vector3 => {
@@ -1585,9 +1586,11 @@ export class KuroCatEngine3D {
     hand.y += (PAW.sole + 0.02) * (1 - tuck);
     if (!onMouse) hand.z -= 0.05 * (1 - tuck);
 
-    // The arm leaves the body on the side it reaches towards, so it stays short.
+    // The arm leaves the body just above its hand: in front of the chest for keys in the middle, round at the
+    // flank for keys out to the side, so it stays short and never reaches across the belly.
     const local = this.catRoot.worldToLocal(this.tmpV1.copy(hand));
-    const want = clamp(Math.atan2(s * local.x, Math.max(0.05, local.z)) + 0.2, 0.72, 1.16);
+    const r = chinchillaRadius(CHINCHILLA.shoulderY);
+    const want = Math.asin(clamp((s * local.x) / r, Math.sin(0.24), Math.sin(1.16)));
     chin.shoulderAngle[index] += (mix(mix(want, 0.96, tuck), 0.8, cover) - chin.shoulderAngle[index]) * approach(16, dt);
     const angle = chin.shoulderAngle[index];
     chinchillaFlank(s * angle, CHINCHILLA.shoulderY, 0.1, arm.shoulderLocal);
@@ -2323,8 +2326,13 @@ export class KuroCatEngine3D {
       this.pokeAnnoy(0.32);
     }
 
-    const useTail =
-      this.tailKeyMode === 'custom'
+    // The chinchilla's tail sits behind it: keys right in front of its belly, like the space bar, are for its paws.
+    const inFront =
+      this.isChinchilla &&
+      Math.abs(this.desk.keyTopWorld(k.spec.id, this.tmpV1).x - this.homePos.x) < CHIN_PAW_ZONE * CHIN_PX * CHINCHILLA.scale;
+    const useTail = inFront
+      ? false
+      : this.tailKeyMode === 'custom'
         ? this.tailKeyIdSet.has(k.spec.id)
         : !this.isCross &&
           this.tailKeyMode !== 'off' &&
