@@ -51,6 +51,7 @@ let active3d = false;
 let webglBlocked = false;
 let privacyActive = false;
 let gameActive = false;
+let stateApplied = false;
 
 // Mute audio inside OBS Browser Source so purring never double-plays on stream
 catAudio.setEnabled(false);
@@ -131,9 +132,9 @@ function syncObs3D(
       canvas3d.classList.add('hidden');
       canvas.classList.remove('hidden');
       engine.resize();
-      engine.start();
       active3d = false;
     }
+    engine.start();
     return;
   }
 
@@ -167,10 +168,14 @@ function syncObs3D(
       })
       .catch(() => {
         webglBlocked = true;
+        engine.start();
       })
       .finally(() => {
         loading3d = null;
       });
+    window.setTimeout(() => {
+      if (!active3d) engine.start();
+    }, 3000);
   }
 }
 
@@ -209,6 +214,7 @@ function applyState(): void {
   engine.setKeyboardConfig(layout, orient);
   engine.setTailKeyConfig(tailMode, tailIds);
   engine.setRenderScale(overrideScale ?? 1.0);
+  stateApplied = true;
   syncObs3D(activeCat, mode, collar, layout, orient, tailMode, tailIds, showBubbles);
 }
 
@@ -317,6 +323,8 @@ function connectStream(): void {
   });
 }
 
-applyState();
-engine.start();
+// Wait for the saved pet before drawing anything, so the default cat never flashes by on stream.
 connectStream();
+window.setTimeout(() => {
+  if (!stateApplied) applyState();
+}, 1500);

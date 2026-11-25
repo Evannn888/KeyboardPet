@@ -247,9 +247,9 @@ function activateRenderEngine(): void {
       canvas3d.classList.add('hidden');
       canvas.classList.remove('hidden');
       engine.resize();
-      engine.start();
       active3d = false;
     }
+    engine.start();
     return;
   }
 
@@ -284,6 +284,11 @@ function activateRenderEngine(): void {
       .finally(() => {
         loading3dPromise = null;
       });
+    // At launch the 2D engine is not running yet and the first thing on screen should be the 3D pet,
+    // but never leave the desktop empty if 3D is slow to arrive.
+    window.setTimeout(() => {
+      if (!active3d) engine.start();
+    }, 3000);
   }
 }
 
@@ -822,8 +827,6 @@ async function triggerManualUpdateCheck(): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
-  engine.start();
-
   // Hide Windows-only desktop shortcut button on macOS
   if (/Mac/i.test(navigator.platform) || /Macintosh/i.test(navigator.userAgent)) {
     const shortcutBtn = document.getElementById('btn-desktop-shortcut');
@@ -845,10 +848,11 @@ async function bootstrap(): Promise<void> {
       appVersion = loadedVer;
       setUpdateHint(`v${appVersion}`);
     }
-    syncMenuUI();
   } catch (err) {
     console.error('Failed to load settings or cats:', err);
   }
+  // Starts the right engine only now, so the saved pet is the first thing on screen.
+  syncMenuUI();
 
   await listen<UpdateProgressEvent>('kuro-update-status', (ev) => {
     handleUpdateProgressEvent(ev.payload, false);
